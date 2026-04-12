@@ -1,0 +1,10 @@
+streamlit
+pandas
+numpy
+geopandas
+plotly
+pydeck
+pyarrow
+fiona
+shapely
+pyproj
