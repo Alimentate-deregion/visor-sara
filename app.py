@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import duckdb
 import geopandas as gpd
 import numpy as np
 import pandas as pd
@@ -16,7 +17,7 @@ import streamlit as st
 st.set_page_config(
     page_title="Visor de precios y abastecimiento agroalimentario",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="collapsed",
 )
 
 BASE_DIR = Path("datos")
@@ -25,6 +26,8 @@ RUTA_LINEAS = BASE_DIR / "lineas_abastecimiento.parquet"
 RUTA_MUNICIPIOS = BASE_DIR / "municipios_ligeros.parquet"
 RUTA_PUNTOS_DESTINO = BASE_DIR / "puntos_destino.geojson"
 RUTA_PUNTOS_ORIGEN = BASE_DIR / "puntos_origen.geojson"
+
+RUTA_LINEAS_SQL = RUTA_LINEAS.as_posix()
 
 DEPTOS_RAPE = {
     "BOGOTÁ", "BOGOTÁ, D.C.", "BOGOTA", "BOGOTA D.C.", "BOGOTÁ D.C.",
@@ -356,56 +359,196 @@ def obtener_mtime(path: Path) -> float:
         return 0.0
 
 
+def construir_where_sql(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel=(), deptos_sel=()):
+    where_clauses = [
+        "RUBRO = ?",
+        "CAST(FECHA AS DATE) BETWEEN ? AND ?"
+    ]
+    params = [rubro, fecha_ini.isoformat(), fecha_fin.isoformat()]
+
+    if semestre_sel == "Primer semestre":
+        where_clauses.append("MES BETWEEN 1 AND 6")
+    elif semestre_sel == "Segundo semestre":
+        where_clauses.append("MES BETWEEN 7 AND 12")
+
+    if centrales_sel:
+        placeholders = ", ".join(["?"] * len(centrales_sel))
+        where_clauses.append(f"CENTRAL_NOMBRE IN ({placeholders})")
+        params.extend(list(centrales_sel))
+
+    if deptos_sel:
+        placeholders = ", ".join(["?"] * len(deptos_sel))
+        where_clauses.append(f"DEPARTAMENTO_ORIGEN IN ({placeholders})")
+        params.extend(list(deptos_sel))
+
+    return " AND ".join(where_clauses), params
+
+
+def preparar_df_lineas(df_lineas, codigos_validos):
+    if df_lineas.empty:
+        return df_lineas.copy()
+
+    df = df_lineas.copy()
+
+    df["FECHA"] = pd.to_datetime(df["FECHA"], errors="coerce")
+
+    for col in ["RUBRO", "CENTRAL_NOMBRE", "DEPARTAMENTO_ORIGEN", "MUNICIPIO_ORIGEN"]:
+        if col in df.columns:
+            df[col] = df[col].apply(normalizar_texto)
+
+    for col in [
+        "TONELADAS", "PRECIO_PROMEDIO", "PRECIO_MEDIANA", "DIAS_CON_DATOS",
+        "LATITUD_ORIGEN", "LONGITUD_ORIGEN", "LATITUD_DESTINO", "LONGITUD_DESTINO", "MES"
+    ]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df["codigo_origen"] = df["CODIGO_DIVIPOLA_MUN_ORIGEN_LIMPIO"].apply(normalizar_codigo_5)
+    df["codigo_destino"] = df["CODIGO_DIVIPOLA_MUN_DESTINO_LIMPIO"].apply(normalizar_codigo_5)
+    df["DEPARTAMENTO_ORIGEN_NORM"] = df["DEPARTAMENTO_ORIGEN"].apply(normalizar_depto)
+
+    df = df[df["codigo_origen"].isin(codigos_validos)].copy()
+
+    df["periodo_mes"] = df["FECHA"].dt.to_period("M").dt.to_timestamp()
+    df["etiqueta_mes"] = df["FECHA"].dt.strftime("%Y-%m")
+    df["semestre"] = np.where(
+        df["MES"].isin([1, 2, 3, 4, 5, 6]),
+        "Primer semestre",
+        "Segundo semestre"
+    )
+
+    return df
+
+
 # =========================================================
-# CARGA DE DATOS
+# CONEXIÓN DUCKDB
+# =========================================================
+
+@st.cache_resource
+def get_duckdb_connection():
+    con = duckdb.connect(database=":memory:")
+    con.execute("PRAGMA threads=4")
+    return con
+
+
+# =========================================================
+# CARGA DE CAPAS ESTÁTICAS
 # =========================================================
 
 @st.cache_data(show_spinner=False)
-def cargar_datos(mtime_lineas, mtime_municipios, mtime_destino, mtime_origen):
-    lineas = pd.read_parquet(RUTA_LINEAS)
+def cargar_capas_estaticas(mtime_municipios, mtime_destino, mtime_origen):
     municipios = gpd.read_parquet(RUTA_MUNICIPIOS)
     puntos_destino = gpd.read_file(RUTA_PUNTOS_DESTINO)
     puntos_origen = gpd.read_file(RUTA_PUNTOS_ORIGEN)
-    return lineas, municipios, puntos_destino, puntos_origen
+    return municipios, puntos_destino, puntos_origen
 
 
-lineas, municipios, puntos_destino, puntos_origen = cargar_datos(
-    obtener_mtime(RUTA_LINEAS),
-    obtener_mtime(RUTA_MUNICIPIOS),
-    obtener_mtime(RUTA_PUNTOS_DESTINO),
-    obtener_mtime(RUTA_PUNTOS_ORIGEN),
+@st.cache_data(show_spinner=False)
+def consultar_catalogos_lineas(mtime_lineas):
+    con = get_duckdb_connection()
+
+    rubros = con.execute(f"""
+        SELECT DISTINCT RUBRO
+        FROM read_parquet('{RUTA_LINEAS_SQL}')
+        WHERE RUBRO IS NOT NULL
+        ORDER BY RUBRO
+    """).df()["RUBRO"].astype(str).tolist()
+
+    centrales = con.execute(f"""
+        SELECT DISTINCT CENTRAL_NOMBRE
+        FROM read_parquet('{RUTA_LINEAS_SQL}')
+        WHERE CENTRAL_NOMBRE IS NOT NULL
+        ORDER BY CENTRAL_NOMBRE
+    """).df()["CENTRAL_NOMBRE"].astype(str).tolist()
+
+    deptos = con.execute(f"""
+        SELECT DISTINCT DEPARTAMENTO_ORIGEN
+        FROM read_parquet('{RUTA_LINEAS_SQL}')
+        WHERE DEPARTAMENTO_ORIGEN IS NOT NULL
+        ORDER BY DEPARTAMENTO_ORIGEN
+    """).df()["DEPARTAMENTO_ORIGEN"].astype(str).tolist()
+
+    rango_fechas = con.execute(f"""
+        SELECT
+            MIN(CAST(FECHA AS DATE)) AS fecha_min,
+            MAX(CAST(FECHA AS DATE)) AS fecha_max
+        FROM read_parquet('{RUTA_LINEAS_SQL}')
+    """).df()
+
+    fecha_min = pd.to_datetime(rango_fechas.loc[0, "fecha_min"]).date()
+    fecha_max = pd.to_datetime(rango_fechas.loc[0, "fecha_max"]).date()
+
+    return rubros, centrales, deptos, fecha_min, fecha_max
+
+
+@st.cache_data(show_spinner=False)
+def consultar_lineas_duckdb(
+    rubro,
+    fecha_ini,
+    fecha_fin,
+    semestre_sel,
+    centrales_sel,
+    deptos_sel,
+    mtime_lineas
+):
+    con = get_duckdb_connection()
+    where_sql, params = construir_where_sql(
+        rubro=rubro,
+        fecha_ini=fecha_ini,
+        fecha_fin=fecha_fin,
+        semestre_sel=semestre_sel,
+        centrales_sel=centrales_sel,
+        deptos_sel=deptos_sel,
+    )
+
+    query = f"""
+        SELECT
+            FECHA,
+            MES,
+            RUBRO,
+            CENTRAL_NOMBRE,
+            DEPARTAMENTO_ORIGEN,
+            MUNICIPIO_ORIGEN,
+            CODIGO_DIVIPOLA_MUN_ORIGEN_LIMPIO,
+            CODIGO_DIVIPOLA_MUN_DESTINO_LIMPIO,
+            TONELADAS,
+            PRECIO_PROMEDIO,
+            PRECIO_MEDIANA,
+            DIAS_CON_DATOS,
+            LONGITUD_ORIGEN,
+            LATITUD_ORIGEN,
+            LONGITUD_DESTINO,
+            LATITUD_DESTINO
+        FROM read_parquet('{RUTA_LINEAS_SQL}')
+        WHERE {where_sql}
+    """
+
+    return con.execute(query, params).df()
+
+
+# =========================================================
+# CARGA INICIAL
+# =========================================================
+
+mtime_lineas = obtener_mtime(RUTA_LINEAS)
+mtime_municipios = obtener_mtime(RUTA_MUNICIPIOS)
+mtime_destino = obtener_mtime(RUTA_PUNTOS_DESTINO)
+mtime_origen = obtener_mtime(RUTA_PUNTOS_ORIGEN)
+
+municipios, puntos_destino, puntos_origen = cargar_capas_estaticas(
+    mtime_municipios,
+    mtime_destino,
+    mtime_origen,
+)
+
+rubros, centrales, deptos, fecha_min_global, fecha_max_global = consultar_catalogos_lineas(
+    mtime_lineas
 )
 
 
 # =========================================================
-# LIMPIEZA Y PREPARACIÓN
+# LIMPIEZA Y PREPARACIÓN DE CAPAS ESTÁTICAS
 # =========================================================
-
-lineas["FECHA"] = pd.to_datetime(lineas["FECHA"], errors="coerce")
-puntos_origen["FECHA"] = pd.to_datetime(puntos_origen["FECHA"], errors="coerce")
-
-for col in ["RUBRO", "DESTINO", "NOMBRE_DESTINO", "DEPARTAMENTO_ORIGEN", "MUNICIPIO_ORIGEN", "CENTRAL_NOMBRE"]:
-    if col in lineas.columns:
-        lineas[col] = lineas[col].apply(normalizar_texto)
-
-for col in ["RUBRO", "DESTINO", "NOMBRE_DESTINO", "DEPARTAMENTO_ORIGEN", "MUNICIPIO_ORIGEN", "CENTRAL_NOMBRE"]:
-    if col in puntos_origen.columns:
-        puntos_origen[col] = puntos_origen[col].apply(normalizar_texto)
-
-for col in [
-    "TONELADAS", "PRECIO_PROMEDIO", "PRECIO_MEDIANA", "DIAS_CON_DATOS",
-    "LATITUD_ORIGEN", "LONGITUD_ORIGEN", "LATITUD_DESTINO", "LONGITUD_DESTINO"
-]:
-    if col in lineas.columns:
-        lineas[col] = pd.to_numeric(lineas[col], errors="coerce")
-
-for col in ["TONELADAS", "PRECIO_PROMEDIO", "PRECIO_MEDIANA", "DIAS_CON_DATOS"]:
-    if col in puntos_origen.columns:
-        puntos_origen[col] = pd.to_numeric(puntos_origen[col], errors="coerce")
-
-lineas["codigo_origen"] = lineas["CODIGO_DIVIPOLA_MUN_ORIGEN_LIMPIO"].apply(normalizar_codigo_5)
-lineas["codigo_destino"] = lineas["CODIGO_DIVIPOLA_MUN_DESTINO_LIMPIO"].apply(normalizar_codigo_5)
-lineas["DEPARTAMENTO_ORIGEN_NORM"] = lineas["DEPARTAMENTO_ORIGEN"].apply(normalizar_depto)
 
 if "MpCodigo" in municipios.columns:
     municipios["codigo_origen"] = municipios["MpCodigo"].apply(normalizar_codigo_5)
@@ -448,19 +591,19 @@ puntos_destino["codigo_destino"] = puntos_destino["CODIGO_MUNICIPIO"].apply(norm
 puntos_destino["NOMBRE_CENTRAL"] = puntos_destino["NOMBRE_CENTRAL"].apply(normalizar_texto)
 puntos_destino["CIUDAD"] = puntos_destino["CIUDAD"].apply(normalizar_texto)
 
+puntos_origen["FECHA"] = pd.to_datetime(puntos_origen["FECHA"], errors="coerce")
+
+for col in ["RUBRO", "DEPARTAMENTO_ORIGEN", "MUNICIPIO_ORIGEN", "CENTRAL_NOMBRE"]:
+    if col in puntos_origen.columns:
+        puntos_origen[col] = puntos_origen[col].apply(normalizar_texto)
+
+for col in ["TONELADAS", "PRECIO_PROMEDIO", "PRECIO_MEDIANA", "DIAS_CON_DATOS", "MES"]:
+    if col in puntos_origen.columns:
+        puntos_origen[col] = pd.to_numeric(puntos_origen[col], errors="coerce")
+
 puntos_origen["codigo_origen"] = puntos_origen["CODIGO_DIVIPOLA_MUN_ORIGEN_LIMPIO"].apply(normalizar_codigo_5)
 puntos_origen["codigo_destino"] = puntos_origen["CODIGO_DIVIPOLA_MUN_DESTINO_LIMPIO"].apply(normalizar_codigo_5)
 puntos_origen["DEPARTAMENTO_ORIGEN_NORM"] = puntos_origen["DEPARTAMENTO_ORIGEN"].apply(normalizar_depto)
-
-codigos_validos = set(municipios["codigo_origen"].dropna().unique())
-
-lineas = lineas[lineas["codigo_origen"].isin(codigos_validos)].copy()
-puntos_origen = puntos_origen[puntos_origen["codigo_origen"].isin(codigos_validos)].copy()
-
-lineas["periodo_mes"] = lineas["FECHA"].dt.to_period("M").dt.to_timestamp()
-lineas["etiqueta_mes"] = lineas["FECHA"].dt.strftime("%Y-%m")
-lineas["semestre"] = np.where(lineas["MES"].isin([1, 2, 3, 4, 5, 6]), "Primer semestre", "Segundo semestre")
-
 puntos_origen["periodo_mes"] = puntos_origen["FECHA"].dt.to_period("M").dt.to_timestamp()
 puntos_origen["etiqueta_mes"] = puntos_origen["FECHA"].dt.strftime("%Y-%m")
 puntos_origen["semestre"] = np.where(
@@ -468,6 +611,9 @@ puntos_origen["semestre"] = np.where(
     "Primer semestre",
     "Segundo semestre"
 )
+
+codigos_validos = set(municipios["codigo_origen"].dropna().unique())
+puntos_origen = puntos_origen[puntos_origen["codigo_origen"].isin(codigos_validos)].copy()
 
 
 # =========================================================
@@ -489,19 +635,11 @@ st.markdown('<div class="filter-wrap">', unsafe_allow_html=True)
 
 f1, f2, f3, f4, f5, f6, f7 = st.columns([1.2, 1.5, 1.1, 1.0, 1.2, 0.9, 0.9])
 
-rubros = sorted(lineas["RUBRO"].dropna().unique().tolist())
-centrales = sorted(lineas["CENTRAL_NOMBRE"].dropna().unique().tolist())
-deptos = sorted(lineas["DEPARTAMENTO_ORIGEN"].dropna().unique().tolist())
-
 with f1:
-    rubro_sel = st.selectbox("Rubro", rubros, index=0)
+    rubro_sel = st.selectbox("Rubro", rubros, index=0 if rubros else None)
 
 with f2:
-    centrales_sel = st.multiselect(
-        "Central mayorista",
-        options=centrales,
-        default=[]
-    )
+    centrales_sel = st.multiselect("Central mayorista", options=centrales, default=[])
 
 with f3:
     semestre_sel = st.selectbox(
@@ -514,13 +652,11 @@ with f4:
     deptos_sel = st.multiselect("Departamento origen", deptos, default=[])
 
 with f5:
-    fecha_min = lineas["FECHA"].min().date()
-    fecha_max = lineas["FECHA"].max().date()
     rango = st.date_input(
         "Periodo",
-        value=(fecha_min, fecha_max),
-        min_value=fecha_min,
-        max_value=fecha_max
+        value=(fecha_min_global, fecha_max_global),
+        min_value=fecha_min_global,
+        max_value=fecha_max_global
     )
 
 with f6:
@@ -534,33 +670,50 @@ st.markdown("</div>", unsafe_allow_html=True)
 if isinstance(rango, tuple) and len(rango) == 2:
     fecha_ini, fecha_fin = rango
 else:
-    fecha_ini, fecha_fin = fecha_min, fecha_max
+    fecha_ini, fecha_fin = fecha_min_global, fecha_max_global
 
 
 # =========================================================
-# UNIVERSOS DE CÁLCULO
+# CONSULTAS DUCKDB
 # =========================================================
 
-df_total = lineas[lineas["RUBRO"] == rubro_sel].copy()
-df_total = df_total[(df_total["FECHA"].dt.date >= fecha_ini) & (df_total["FECHA"].dt.date <= fecha_fin)].copy()
+centrales_tuple = tuple(centrales_sel)
+deptos_tuple = tuple(deptos_sel)
 
-if semestre_sel != "Todos":
-    df_total = df_total[df_total["semestre"] == semestre_sel].copy()
+df_total_raw = consultar_lineas_duckdb(
+    rubro=rubro_sel,
+    fecha_ini=fecha_ini,
+    fecha_fin=fecha_fin,
+    semestre_sel=semestre_sel,
+    centrales_sel=tuple(),
+    deptos_sel=tuple(),
+    mtime_lineas=mtime_lineas,
+)
+
+df_raw = consultar_lineas_duckdb(
+    rubro=rubro_sel,
+    fecha_ini=fecha_ini,
+    fecha_fin=fecha_fin,
+    semestre_sel=semestre_sel,
+    centrales_sel=centrales_tuple,
+    deptos_sel=deptos_tuple,
+    mtime_lineas=mtime_lineas,
+)
+
+df_total = preparar_df_lineas(df_total_raw, codigos_validos)
+df = preparar_df_lineas(df_raw, codigos_validos)
 
 df_rape_base = df_total[df_total["DEPARTAMENTO_ORIGEN_NORM"].isin(DEPTOS_RAPE)].copy()
-
-df = df_total.copy()
-
-if centrales_sel:
-    df = df[df["CENTRAL_NOMBRE"].isin(centrales_sel)].copy()
-
-if deptos_sel:
-    df = df[df["DEPARTAMENTO_ORIGEN"].isin(deptos_sel)].copy()
 
 if centrales_sel:
     destino_label = ", ".join(centrales_sel)
 else:
     destino_label = "todas las centrales mayoristas seleccionadas"
+
+
+# =========================================================
+# FILTRO DE PUNTOS ORIGEN
+# =========================================================
 
 puntos_origen_f = puntos_origen.copy()
 puntos_origen_f = puntos_origen_f[
@@ -792,6 +945,7 @@ municipios_mapa["toneladas_total"] = municipios_mapa["toneladas_total"].fillna(0
 municipios_mapa["categoria_eficiencia"] = municipios_mapa["categoria_eficiencia"].fillna("Sin flujo")
 municipios_mapa["es_top30"] = municipios_mapa["codigo_origen"].astype(str).isin(top30_codigos)
 
+
 def fill_color(row):
     if row["es_top30"]:
         return [110, 68, 255, 150]
@@ -801,6 +955,7 @@ def fill_color(row):
         return [65, 145, 255, 120]
     return [40, 48, 62, 18]
 
+
 def line_color(row):
     if row["es_top30"]:
         return [170, 130, 255, 240]
@@ -809,6 +964,7 @@ def line_color(row):
     if row["categoria_eficiencia"] == "Eficiencia media":
         return [95, 170, 255, 220]
     return [100, 110, 125, 60]
+
 
 municipios_mapa["fill_color"] = municipios_mapa.apply(fill_color, axis=1)
 municipios_mapa["line_color"] = municipios_mapa.apply(line_color, axis=1)
