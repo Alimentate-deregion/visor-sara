@@ -37,6 +37,7 @@ DEPTOS_RAPE = {
 MAX_FILAS_TABLA_DEFAULT = 300
 MAX_LINEAS_MAPA_DEFAULT = 600
 MAX_LINEAS_MAPA_MAX = 1500
+COBERTURA_FLUJOS_DEFAULT = 90
 
 
 # =========================================================
@@ -201,19 +202,12 @@ st.markdown("""
 # FUNCIONES AUXILIARES
 # =========================================================
 
-def limpiar_codigo(valor):
+def normalizar_codigo_5(valor):
     if pd.isna(valor):
         return np.nan
     s = str(valor).strip().replace("'", "")
     if s.endswith(".0"):
         s = s[:-2]
-    return s.strip()
-
-
-def normalizar_codigo_5(valor):
-    if pd.isna(valor):
-        return np.nan
-    s = limpiar_codigo(valor)
     if s == "":
         return np.nan
     return s.zfill(5) if s.isdigit() else s
@@ -223,22 +217,6 @@ def normalizar_texto(valor):
     if pd.isna(valor):
         return ""
     return str(valor).strip()
-
-
-def normalizar_depto(valor):
-    if pd.isna(valor):
-        return ""
-    txt = str(valor).strip().upper()
-    reemplazos = {
-        "BOGOTA": "BOGOTÁ",
-        "BOGOTA D.C.": "BOGOTÁ, D.C.",
-        "BOGOTA, D.C.": "BOGOTÁ, D.C.",
-        "BOGOTÁ D.C.": "BOGOTÁ, D.C.",
-        "BOGOTA DC": "BOGOTÁ, D.C.",
-        "BOGOTÁ DC": "BOGOTÁ, D.C.",
-        "BOYACA": "BOYACÁ"
-    }
-    return reemplazos.get(txt, txt)
 
 
 def formatear_cop(valor):
@@ -260,16 +238,6 @@ def norm_serie(s):
     if s.max() == s.min():
         return pd.Series(np.ones(len(s)), index=s.index)
     return (s - s.min()) / (s.max() - s.min())
-
-
-def moda_numerica(serie):
-    s = pd.to_numeric(serie, errors="coerce").dropna()
-    if s.empty:
-        return np.nan
-    modas = s.mode()
-    if modas.empty:
-        return np.nan
-    return float(modas.iloc[0])
 
 
 def clasificar_eficiencia(indice):
@@ -362,7 +330,7 @@ def obtener_mtime(path: Path) -> float:
 def construir_where_sql(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel=(), deptos_sel=()):
     where_clauses = [
         "RUBRO = ?",
-        "CAST(FECHA AS DATE) BETWEEN ? AND ?"
+        "FECHA BETWEEN ? AND ?"
     ]
     params = [rubro, fecha_ini.isoformat(), fecha_fin.isoformat()]
 
@@ -384,51 +352,24 @@ def construir_where_sql(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel
     return " AND ".join(where_clauses), params
 
 
-def preparar_df_lineas(df_lineas, codigos_validos):
-    if df_lineas.empty:
-        return df_lineas.copy()
+def filtrar_flujos_por_cobertura(df_flujos, cobertura_pct, max_lineas):
+    if df_flujos.empty:
+        return df_flujos
 
-    df = df_lineas.copy()
+    df = df_flujos.sort_values("toneladas_total", ascending=False).reset_index(drop=True).copy()
+    total = df["toneladas_total"].sum()
 
-    df["FECHA"] = pd.to_datetime(df["FECHA"], errors="coerce")
+    if total <= 0:
+        return df.head(max_lineas).copy()
 
-    for col in ["RUBRO", "CENTRAL_NOMBRE", "DEPARTAMENTO_ORIGEN", "MUNICIPIO_ORIGEN"]:
-        if col in df.columns:
-            df[col] = df[col].apply(normalizar_texto)
+    df["participacion_pct"] = (df["toneladas_total"] / total) * 100
+    df["acumulado_pct"] = df["participacion_pct"].cumsum()
 
-    for col in [
-        "TONELADAS", "PRECIO_PROMEDIO", "PRECIO_MEDIANA", "DIAS_CON_DATOS",
-        "LATITUD_ORIGEN", "LONGITUD_ORIGEN", "LATITUD_DESTINO", "LONGITUD_DESTINO", "MES"
-    ]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+    idx_corte = np.where(df["acumulado_pct"] >= cobertura_pct)[0]
+    n_filas_cobertura = int(idx_corte[0] + 1) if len(idx_corte) > 0 else len(df)
+    n_final = min(max_lineas, n_filas_cobertura)
 
-    df["codigo_origen"] = df["CODIGO_DIVIPOLA_MUN_ORIGEN_LIMPIO"].apply(normalizar_codigo_5)
-    df["codigo_destino"] = df["CODIGO_DIVIPOLA_MUN_DESTINO_LIMPIO"].apply(normalizar_codigo_5)
-    df["DEPARTAMENTO_ORIGEN_NORM"] = df["DEPARTAMENTO_ORIGEN"].apply(normalizar_depto)
-
-    df = df[df["codigo_origen"].isin(codigos_validos)].copy()
-
-    df["periodo_mes"] = df["FECHA"].dt.to_period("M").dt.to_timestamp()
-    df["etiqueta_mes"] = df["FECHA"].dt.strftime("%Y-%m")
-    df["semestre"] = np.where(
-        df["MES"].isin([1, 2, 3, 4, 5, 6]),
-        "Primer semestre",
-        "Segundo semestre"
-    )
-
-    return df
-
-
-# =========================================================
-# CONEXIÓN DUCKDB
-# =========================================================
-
-@st.cache_resource
-def get_duckdb_connection():
-    con = duckdb.connect(database=":memory:")
-    con.execute("PRAGMA threads=4")
-    return con
+    return df.head(max(n_final, 1)).copy()
 
 
 # =========================================================
@@ -443,36 +384,192 @@ def cargar_capas_estaticas(mtime_municipios, mtime_destino, mtime_origen):
     return municipios, puntos_destino, puntos_origen
 
 
-@st.cache_data(show_spinner=False)
-def consultar_catalogos_lineas(mtime_lineas):
-    con = get_duckdb_connection()
+# =========================================================
+# PREPARACIÓN DE CAPAS ESTÁTICAS
+# =========================================================
 
-    rubros = con.execute(f"""
-        SELECT DISTINCT RUBRO
+def preparar_capas_estaticas(municipios, puntos_destino, puntos_origen):
+    municipios = municipios.copy()
+    puntos_destino = puntos_destino.copy()
+    puntos_origen = puntos_origen.copy()
+
+    if "MpCodigo" in municipios.columns:
+        municipios["codigo_origen"] = municipios["MpCodigo"].apply(normalizar_codigo_5)
+    elif "CODIGO_MUNICIPIO" in municipios.columns:
+        municipios["codigo_origen"] = municipios["CODIGO_MUNICIPIO"].apply(normalizar_codigo_5)
+    else:
+        raise ValueError("La capa de municipios no tiene MpCodigo ni CODIGO_MUNICIPIO.")
+
+    if "Nombre" in municipios.columns:
+        municipios["nombre_municipio"] = municipios["Nombre"].apply(normalizar_texto)
+    elif "MpNombre" in municipios.columns:
+        municipios["nombre_municipio"] = municipios["MpNombre"].apply(normalizar_texto)
+    elif "MUNICIPIO" in municipios.columns:
+        municipios["nombre_municipio"] = municipios["MUNICIPIO"].apply(normalizar_texto)
+    elif "NOMBRE_MUNICIPIO" in municipios.columns:
+        municipios["nombre_municipio"] = municipios["NOMBRE_MUNICIPIO"].apply(normalizar_texto)
+    elif "NOMBRE_MPIO" in municipios.columns:
+        municipios["nombre_municipio"] = municipios["NOMBRE_MPIO"].apply(normalizar_texto)
+    elif "NOM_MUN" in municipios.columns:
+        municipios["nombre_municipio"] = municipios["NOM_MUN"].apply(normalizar_texto)
+    elif "municipio" in municipios.columns:
+        municipios["nombre_municipio"] = municipios["municipio"].apply(normalizar_texto)
+    elif "nombre" in municipios.columns:
+        municipios["nombre_municipio"] = municipios["nombre"].apply(normalizar_texto)
+    else:
+        municipios["nombre_municipio"] = ""
+
+    if "Depto" in municipios.columns:
+        municipios["departamento"] = municipios["Depto"].apply(normalizar_texto)
+    elif "DEPARTAMENTO" in municipios.columns:
+        municipios["departamento"] = municipios["DEPARTAMENTO"].apply(normalizar_texto)
+    elif "NOMBRE_DPT" in municipios.columns:
+        municipios["departamento"] = municipios["NOMBRE_DPT"].apply(normalizar_texto)
+    elif "NOM_DEP" in municipios.columns:
+        municipios["departamento"] = municipios["NOM_DEP"].apply(normalizar_texto)
+    else:
+        municipios["departamento"] = ""
+
+    puntos_destino["codigo_destino"] = puntos_destino["CODIGO_MUNICIPIO"].apply(normalizar_codigo_5)
+    puntos_destino["NOMBRE_CENTRAL"] = puntos_destino["NOMBRE_CENTRAL"].apply(normalizar_texto)
+    puntos_destino["CIUDAD"] = puntos_destino["CIUDAD"].apply(normalizar_texto)
+
+    puntos_origen["FECHA"] = pd.to_datetime(puntos_origen["FECHA"], errors="coerce")
+
+    for col in ["RUBRO", "DEPARTAMENTO_ORIGEN", "MUNICIPIO_ORIGEN", "CENTRAL_NOMBRE"]:
+        if col in puntos_origen.columns:
+            puntos_origen[col] = puntos_origen[col].apply(normalizar_texto)
+
+    for col in ["TONELADAS", "PRECIO_PROMEDIO", "PRECIO_MEDIANA", "DIAS_CON_DATOS", "MES"]:
+        if col in puntos_origen.columns:
+            puntos_origen[col] = pd.to_numeric(puntos_origen[col], errors="coerce")
+
+    puntos_origen["codigo_origen"] = puntos_origen["CODIGO_DIVIPOLA_MUN_ORIGEN_LIMPIO"].apply(normalizar_codigo_5)
+    puntos_origen["codigo_destino"] = puntos_origen["CODIGO_DIVIPOLA_MUN_DESTINO_LIMPIO"].apply(normalizar_codigo_5)
+
+    depto_norm_map = {
+        "BOGOTA": "BOGOTÁ",
+        "BOGOTA D.C.": "BOGOTÁ, D.C.",
+        "BOGOTA, D.C.": "BOGOTÁ, D.C.",
+        "BOGOTÁ D.C.": "BOGOTÁ, D.C.",
+        "BOGOTA DC": "BOGOTÁ, D.C.",
+        "BOGOTÁ DC": "BOGOTÁ, D.C.",
+        "BOYACA": "BOYACÁ"
+    }
+
+    puntos_origen["DEPARTAMENTO_ORIGEN_NORM"] = (
+        puntos_origen["DEPARTAMENTO_ORIGEN"]
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .replace(depto_norm_map)
+    )
+
+    puntos_origen["periodo_mes"] = puntos_origen["FECHA"].dt.to_period("M").dt.to_timestamp()
+    puntos_origen["etiqueta_mes"] = puntos_origen["FECHA"].dt.strftime("%Y-%m")
+    puntos_origen["semestre"] = np.where(
+        puntos_origen["MES"].isin([1, 2, 3, 4, 5, 6]),
+        "Primer semestre",
+        "Segundo semestre"
+    )
+
+    codigos_validos = tuple(sorted(municipios["codigo_origen"].dropna().astype(str).unique().tolist()))
+    puntos_origen = puntos_origen[puntos_origen["codigo_origen"].isin(codigos_validos)].copy()
+
+    return municipios, puntos_destino, puntos_origen, codigos_validos
+
+
+# =========================================================
+# CONEXIÓN DUCKDB Y VISTA LIMPIA
+# =========================================================
+
+@st.cache_resource(show_spinner=False)
+def get_duckdb_connection(mtime_lineas, codigos_validos):
+    con = duckdb.connect(database=":memory:")
+    con.execute("PRAGMA threads=4")
+
+    df_valid_codes = pd.DataFrame({"codigo_origen": list(codigos_validos)})
+    con.register("valid_codes_df", df_valid_codes)
+
+    con.execute("CREATE OR REPLACE TEMP TABLE valid_codes AS SELECT * FROM valid_codes_df")
+
+    con.execute(f"""
+        CREATE OR REPLACE VIEW lineas AS
+        SELECT
+            CAST(CAST(FECHA AS DATE) AS DATE) AS FECHA,
+            CAST(MES AS INTEGER) AS MES,
+            TRIM(CAST(RUBRO AS VARCHAR)) AS RUBRO,
+            TRIM(CAST(CENTRAL_NOMBRE AS VARCHAR)) AS CENTRAL_NOMBRE,
+            TRIM(CAST(DEPARTAMENTO_ORIGEN AS VARCHAR)) AS DEPARTAMENTO_ORIGEN,
+            TRIM(CAST(MUNICIPIO_ORIGEN AS VARCHAR)) AS MUNICIPIO_ORIGEN,
+            LPAD(REGEXP_REPLACE(CAST(CODIGO_DIVIPOLA_MUN_ORIGEN_LIMPIO AS VARCHAR), '\\\\.0$', ''), 5, '0') AS codigo_origen,
+            LPAD(REGEXP_REPLACE(CAST(CODIGO_DIVIPOLA_MUN_DESTINO_LIMPIO AS VARCHAR), '\\\\.0$', ''), 5, '0') AS codigo_destino,
+            CAST(TONELADAS AS DOUBLE) AS TONELADAS,
+            CAST(PRECIO_PROMEDIO AS DOUBLE) AS PRECIO_PROMEDIO,
+            CAST(PRECIO_MEDIANA AS DOUBLE) AS PRECIO_MEDIANA,
+            CAST(DIAS_CON_DATOS AS DOUBLE) AS DIAS_CON_DATOS,
+            CAST(LONGITUD_ORIGEN AS DOUBLE) AS LONGITUD_ORIGEN,
+            CAST(LATITUD_ORIGEN AS DOUBLE) AS LATITUD_ORIGEN,
+            CAST(LONGITUD_DESTINO AS DOUBLE) AS LONGITUD_DESTINO,
+            CAST(LATITUD_DESTINO AS DOUBLE) AS LATITUD_DESTINO,
+            CASE
+                WHEN UPPER(TRIM(CAST(DEPARTAMENTO_ORIGEN AS VARCHAR))) = 'BOGOTA' THEN 'BOGOTÁ'
+                WHEN UPPER(TRIM(CAST(DEPARTAMENTO_ORIGEN AS VARCHAR))) = 'BOGOTA D.C.' THEN 'BOGOTÁ, D.C.'
+                WHEN UPPER(TRIM(CAST(DEPARTAMENTO_ORIGEN AS VARCHAR))) = 'BOGOTA, D.C.' THEN 'BOGOTÁ, D.C.'
+                WHEN UPPER(TRIM(CAST(DEPARTAMENTO_ORIGEN AS VARCHAR))) = 'BOGOTÁ D.C.' THEN 'BOGOTÁ, D.C.'
+                WHEN UPPER(TRIM(CAST(DEPARTAMENTO_ORIGEN AS VARCHAR))) = 'BOGOTA DC' THEN 'BOGOTÁ, D.C.'
+                WHEN UPPER(TRIM(CAST(DEPARTAMENTO_ORIGEN AS VARCHAR))) = 'BOGOTÁ DC' THEN 'BOGOTÁ, D.C.'
+                WHEN UPPER(TRIM(CAST(DEPARTAMENTO_ORIGEN AS VARCHAR))) = 'BOYACA' THEN 'BOYACÁ'
+                ELSE UPPER(TRIM(CAST(DEPARTAMENTO_ORIGEN AS VARCHAR)))
+            END AS DEPARTAMENTO_ORIGEN_NORM,
+            CAST(DATE_TRUNC('month', CAST(FECHA AS DATE)) AS DATE) AS periodo_mes,
+            STRFTIME(CAST(FECHA AS DATE), '%Y-%m') AS etiqueta_mes,
+            CASE
+                WHEN CAST(MES AS INTEGER) BETWEEN 1 AND 6 THEN 'Primer semestre'
+                ELSE 'Segundo semestre'
+            END AS semestre
         FROM read_parquet('{RUTA_LINEAS_SQL}')
+        WHERE LPAD(REGEXP_REPLACE(CAST(CODIGO_DIVIPOLA_MUN_ORIGEN_LIMPIO AS VARCHAR), '\\\\.0$', ''), 5, '0')
+              IN (SELECT codigo_origen FROM valid_codes)
+    """)
+
+    return con
+
+
+# =========================================================
+# CONSULTAS DUCKDB
+# =========================================================
+
+@st.cache_data(show_spinner=False)
+def consultar_catalogos_lineas(mtime_lineas, codigos_validos):
+    con = get_duckdb_connection(mtime_lineas, codigos_validos)
+
+    rubros = con.execute("""
+        SELECT DISTINCT RUBRO
+        FROM lineas
         WHERE RUBRO IS NOT NULL
         ORDER BY RUBRO
     """).df()["RUBRO"].astype(str).tolist()
 
-    centrales = con.execute(f"""
+    centrales = con.execute("""
         SELECT DISTINCT CENTRAL_NOMBRE
-        FROM read_parquet('{RUTA_LINEAS_SQL}')
+        FROM lineas
         WHERE CENTRAL_NOMBRE IS NOT NULL
         ORDER BY CENTRAL_NOMBRE
     """).df()["CENTRAL_NOMBRE"].astype(str).tolist()
 
-    deptos = con.execute(f"""
+    deptos = con.execute("""
         SELECT DISTINCT DEPARTAMENTO_ORIGEN
-        FROM read_parquet('{RUTA_LINEAS_SQL}')
+        FROM lineas
         WHERE DEPARTAMENTO_ORIGEN IS NOT NULL
         ORDER BY DEPARTAMENTO_ORIGEN
     """).df()["DEPARTAMENTO_ORIGEN"].astype(str).tolist()
 
-    rango_fechas = con.execute(f"""
+    rango_fechas = con.execute("""
         SELECT
-            MIN(CAST(FECHA AS DATE)) AS fecha_min,
-            MAX(CAST(FECHA AS DATE)) AS fecha_max
-        FROM read_parquet('{RUTA_LINEAS_SQL}')
+            MIN(FECHA) AS fecha_min,
+            MAX(FECHA) AS fecha_max
+        FROM lineas
     """).df()
 
     fecha_min = pd.to_datetime(rango_fechas.loc[0, "fecha_min"]).date()
@@ -482,45 +579,153 @@ def consultar_catalogos_lineas(mtime_lineas):
 
 
 @st.cache_data(show_spinner=False)
-def consultar_lineas_duckdb(
-    rubro,
-    fecha_ini,
-    fecha_fin,
-    semestre_sel,
-    centrales_sel,
-    deptos_sel,
-    mtime_lineas
-):
-    con = get_duckdb_connection()
-    where_sql, params = construir_where_sql(
-        rubro=rubro,
-        fecha_ini=fecha_ini,
-        fecha_fin=fecha_fin,
-        semestre_sel=semestre_sel,
-        centrales_sel=centrales_sel,
-        deptos_sel=deptos_sel,
-    )
+def consultar_metricas_filtradas(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel, mtime_lineas, codigos_validos):
+    con = get_duckdb_connection(mtime_lineas, codigos_validos)
+    where_sql, params = construir_where_sql(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel)
 
     query = f"""
         SELECT
-            FECHA,
-            MES,
-            RUBRO,
-            CENTRAL_NOMBRE,
-            DEPARTAMENTO_ORIGEN,
+            AVG(PRECIO_PROMEDIO) AS precio_ref,
+            SUM(TONELADAS) AS volumen_total_filtro,
+            COUNT(DISTINCT codigo_origen) AS municipios_activos,
+            COUNT(DISTINCT codigo_destino) AS centrales_activas
+        FROM lineas
+        WHERE {where_sql}
+    """
+
+    return con.execute(query, params).df()
+
+
+@st.cache_data(show_spinner=False)
+def consultar_metricas_totales(rubro, fecha_ini, fecha_fin, semestre_sel, mtime_lineas, codigos_validos):
+    con = get_duckdb_connection(mtime_lineas, codigos_validos)
+    where_sql, params = construir_where_sql(rubro, fecha_ini, fecha_fin, semestre_sel, tuple(), tuple())
+
+    volumen_total = con.execute(
+        f"SELECT SUM(TONELADAS) AS volumen_total_total FROM lineas WHERE {where_sql}",
+        params
+    ).df()
+
+    deptos_rape = list(DEPTOS_RAPE)
+    placeholders = ", ".join(["?"] * len(deptos_rape))
+    volumen_rape = con.execute(
+        f"""
+        SELECT SUM(TONELADAS) AS volumen_total_rape
+        FROM lineas
+        WHERE {where_sql}
+          AND DEPARTAMENTO_ORIGEN_NORM IN ({placeholders})
+        """,
+        params + deptos_rape
+    ).df()
+
+    return volumen_total, volumen_rape
+
+
+@st.cache_data(show_spinner=False)
+def consultar_ranking_base(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel, mtime_lineas, codigos_validos):
+    con = get_duckdb_connection(mtime_lineas, codigos_validos)
+    where_sql, params = construir_where_sql(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel)
+
+    query = f"""
+        SELECT
+            codigo_origen,
             MUNICIPIO_ORIGEN,
-            CODIGO_DIVIPOLA_MUN_ORIGEN_LIMPIO,
-            CODIGO_DIVIPOLA_MUN_DESTINO_LIMPIO,
-            TONELADAS,
-            PRECIO_PROMEDIO,
-            PRECIO_MEDIANA,
-            DIAS_CON_DATOS,
+            DEPARTAMENTO_ORIGEN,
+            SUM(TONELADAS) AS toneladas_total,
+            AVG(PRECIO_PROMEDIO) AS precio_promedio,
+            SUM(DIAS_CON_DATOS) AS dias_con_datos,
+            COUNT(DISTINCT periodo_mes) AS meses_participacion,
+            SUM(PRECIO_PROMEDIO * TONELADAS) AS recursos_movilizados_aprox
+        FROM lineas
+        WHERE {where_sql}
+        GROUP BY 1, 2, 3
+    """
+
+    return con.execute(query, params).df()
+
+
+@st.cache_data(show_spinner=False)
+def consultar_moda_precios(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel, mtime_lineas, codigos_validos):
+    con = get_duckdb_connection(mtime_lineas, codigos_validos)
+    where_sql, params = construir_where_sql(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel)
+
+    query = f"""
+        SELECT
+            codigo_origen,
+            MODE(PRECIO_PROMEDIO) AS precio_moda
+        FROM lineas
+        WHERE {where_sql}
+        GROUP BY 1
+    """
+
+    return con.execute(query, params).df()
+
+
+@st.cache_data(show_spinner=False)
+def consultar_serie_mensual(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel, mtime_lineas, codigos_validos):
+    con = get_duckdb_connection(mtime_lineas, codigos_validos)
+    where_sql, params = construir_where_sql(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel)
+
+    query = f"""
+        SELECT
+            periodo_mes,
+            etiqueta_mes,
+            AVG(PRECIO_PROMEDIO) AS precio_promedio,
+            SUM(TONELADAS) AS toneladas_total
+        FROM lineas
+        WHERE {where_sql}
+        GROUP BY 1, 2
+        ORDER BY 1
+    """
+
+    return con.execute(query, params).df()
+
+
+@st.cache_data(show_spinner=False)
+def consultar_flujos_mapa(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel, mtime_lineas, codigos_validos):
+    con = get_duckdb_connection(mtime_lineas, codigos_validos)
+    where_sql, params = construir_where_sql(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel)
+
+    query = f"""
+        SELECT
+            codigo_origen,
+            MUNICIPIO_ORIGEN,
+            DEPARTAMENTO_ORIGEN,
+            CENTRAL_NOMBRE,
+            codigo_destino,
             LONGITUD_ORIGEN,
             LATITUD_ORIGEN,
             LONGITUD_DESTINO,
-            LATITUD_DESTINO
-        FROM read_parquet('{RUTA_LINEAS_SQL}')
+            LATITUD_DESTINO,
+            SUM(TONELADAS) AS toneladas_total,
+            AVG(PRECIO_PROMEDIO) AS precio_promedio
+        FROM lineas
         WHERE {where_sql}
+        GROUP BY 1,2,3,4,5,6,7,8,9
+        HAVING LONGITUD_ORIGEN IS NOT NULL
+           AND LATITUD_ORIGEN IS NOT NULL
+           AND LONGITUD_DESTINO IS NOT NULL
+           AND LATITUD_DESTINO IS NOT NULL
+        ORDER BY toneladas_total DESC
+    """
+
+    return con.execute(query, params).df()
+
+
+@st.cache_data(show_spinner=False)
+def consultar_sankey_base(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel, mtime_lineas, codigos_validos):
+    con = get_duckdb_connection(mtime_lineas, codigos_validos)
+    where_sql, params = construir_where_sql(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel)
+
+    query = f"""
+        SELECT
+            MUNICIPIO_ORIGEN,
+            CENTRAL_NOMBRE,
+            SUM(TONELADAS) AS toneladas_total
+        FROM lineas
+        WHERE {where_sql}
+        GROUP BY 1, 2
+        ORDER BY toneladas_total DESC
     """
 
     return con.execute(query, params).df()
@@ -535,85 +740,22 @@ mtime_municipios = obtener_mtime(RUTA_MUNICIPIOS)
 mtime_destino = obtener_mtime(RUTA_PUNTOS_DESTINO)
 mtime_origen = obtener_mtime(RUTA_PUNTOS_ORIGEN)
 
-municipios, puntos_destino, puntos_origen = cargar_capas_estaticas(
+municipios_raw, puntos_destino_raw, puntos_origen_raw = cargar_capas_estaticas(
     mtime_municipios,
     mtime_destino,
     mtime_origen,
 )
 
+municipios, puntos_destino, puntos_origen, codigos_validos = preparar_capas_estaticas(
+    municipios_raw,
+    puntos_destino_raw,
+    puntos_origen_raw,
+)
+
 rubros, centrales, deptos, fecha_min_global, fecha_max_global = consultar_catalogos_lineas(
-    mtime_lineas
+    mtime_lineas,
+    codigos_validos
 )
-
-
-# =========================================================
-# LIMPIEZA Y PREPARACIÓN DE CAPAS ESTÁTICAS
-# =========================================================
-
-if "MpCodigo" in municipios.columns:
-    municipios["codigo_origen"] = municipios["MpCodigo"].apply(normalizar_codigo_5)
-elif "CODIGO_MUNICIPIO" in municipios.columns:
-    municipios["codigo_origen"] = municipios["CODIGO_MUNICIPIO"].apply(normalizar_codigo_5)
-else:
-    raise ValueError("La capa de municipios no tiene MpCodigo ni CODIGO_MUNICIPIO.")
-
-if "Nombre" in municipios.columns:
-    municipios["nombre_municipio"] = municipios["Nombre"].apply(normalizar_texto)
-elif "MpNombre" in municipios.columns:
-    municipios["nombre_municipio"] = municipios["MpNombre"].apply(normalizar_texto)
-elif "MUNICIPIO" in municipios.columns:
-    municipios["nombre_municipio"] = municipios["MUNICIPIO"].apply(normalizar_texto)
-elif "NOMBRE_MUNICIPIO" in municipios.columns:
-    municipios["nombre_municipio"] = municipios["NOMBRE_MUNICIPIO"].apply(normalizar_texto)
-elif "NOMBRE_MPIO" in municipios.columns:
-    municipios["nombre_municipio"] = municipios["NOMBRE_MPIO"].apply(normalizar_texto)
-elif "NOM_MUN" in municipios.columns:
-    municipios["nombre_municipio"] = municipios["NOM_MUN"].apply(normalizar_texto)
-elif "municipio" in municipios.columns:
-    municipios["nombre_municipio"] = municipios["municipio"].apply(normalizar_texto)
-elif "nombre" in municipios.columns:
-    municipios["nombre_municipio"] = municipios["nombre"].apply(normalizar_texto)
-else:
-    municipios["nombre_municipio"] = ""
-
-if "Depto" in municipios.columns:
-    municipios["departamento"] = municipios["Depto"].apply(normalizar_texto)
-elif "DEPARTAMENTO" in municipios.columns:
-    municipios["departamento"] = municipios["DEPARTAMENTO"].apply(normalizar_texto)
-elif "NOMBRE_DPT" in municipios.columns:
-    municipios["departamento"] = municipios["NOMBRE_DPT"].apply(normalizar_texto)
-elif "NOM_DEP" in municipios.columns:
-    municipios["departamento"] = municipios["NOM_DEP"].apply(normalizar_texto)
-else:
-    municipios["departamento"] = ""
-
-puntos_destino["codigo_destino"] = puntos_destino["CODIGO_MUNICIPIO"].apply(normalizar_codigo_5)
-puntos_destino["NOMBRE_CENTRAL"] = puntos_destino["NOMBRE_CENTRAL"].apply(normalizar_texto)
-puntos_destino["CIUDAD"] = puntos_destino["CIUDAD"].apply(normalizar_texto)
-
-puntos_origen["FECHA"] = pd.to_datetime(puntos_origen["FECHA"], errors="coerce")
-
-for col in ["RUBRO", "DEPARTAMENTO_ORIGEN", "MUNICIPIO_ORIGEN", "CENTRAL_NOMBRE"]:
-    if col in puntos_origen.columns:
-        puntos_origen[col] = puntos_origen[col].apply(normalizar_texto)
-
-for col in ["TONELADAS", "PRECIO_PROMEDIO", "PRECIO_MEDIANA", "DIAS_CON_DATOS", "MES"]:
-    if col in puntos_origen.columns:
-        puntos_origen[col] = pd.to_numeric(puntos_origen[col], errors="coerce")
-
-puntos_origen["codigo_origen"] = puntos_origen["CODIGO_DIVIPOLA_MUN_ORIGEN_LIMPIO"].apply(normalizar_codigo_5)
-puntos_origen["codigo_destino"] = puntos_origen["CODIGO_DIVIPOLA_MUN_DESTINO_LIMPIO"].apply(normalizar_codigo_5)
-puntos_origen["DEPARTAMENTO_ORIGEN_NORM"] = puntos_origen["DEPARTAMENTO_ORIGEN"].apply(normalizar_depto)
-puntos_origen["periodo_mes"] = puntos_origen["FECHA"].dt.to_period("M").dt.to_timestamp()
-puntos_origen["etiqueta_mes"] = puntos_origen["FECHA"].dt.strftime("%Y-%m")
-puntos_origen["semestre"] = np.where(
-    puntos_origen["MES"].isin([1, 2, 3, 4, 5, 6]),
-    "Primer semestre",
-    "Segundo semestre"
-)
-
-codigos_validos = set(municipios["codigo_origen"].dropna().unique())
-puntos_origen = puntos_origen[puntos_origen["codigo_origen"].isin(codigos_validos)].copy()
 
 
 # =========================================================
@@ -633,7 +775,7 @@ st.markdown(
 
 st.markdown('<div class="filter-wrap">', unsafe_allow_html=True)
 
-f1, f2, f3, f4, f5, f6, f7 = st.columns([1.2, 1.5, 1.1, 1.0, 1.2, 0.9, 0.9])
+f1, f2, f3, f4, f5, f6, f7, f8 = st.columns([1.2, 1.5, 1.1, 1.0, 1.2, 0.9, 0.9, 1.0])
 
 with f1:
     rubro_sel = st.selectbox("Rubro", rubros, index=0 if rubros else None)
@@ -660,10 +802,13 @@ with f5:
     )
 
 with f6:
-    max_lineas = st.slider("Top flujos", 100, MAX_LINEAS_MAPA_MAX, MAX_LINEAS_MAPA_DEFAULT, 100)
+    max_lineas = st.slider("Máx. flujos", 100, MAX_LINEAS_MAPA_MAX, MAX_LINEAS_MAPA_DEFAULT, 100)
 
 with f7:
     max_filas_tabla = st.slider("Filas tabla", 50, 1000, MAX_FILAS_TABLA_DEFAULT, 50)
+
+with f8:
+    cobertura_flujos = st.slider("Cobertura flujos %", 60, 100, COBERTURA_FLUJOS_DEFAULT, 5)
 
 st.markdown("</div>", unsafe_allow_html=True)
 
@@ -672,38 +817,49 @@ if isinstance(rango, tuple) and len(rango) == 2:
 else:
     fecha_ini, fecha_fin = fecha_min_global, fecha_max_global
 
-
-# =========================================================
-# CONSULTAS DUCKDB
-# =========================================================
-
 centrales_tuple = tuple(centrales_sel)
 deptos_tuple = tuple(deptos_sel)
 
-df_total_raw = consultar_lineas_duckdb(
-    rubro=rubro_sel,
-    fecha_ini=fecha_ini,
-    fecha_fin=fecha_fin,
-    semestre_sel=semestre_sel,
-    centrales_sel=tuple(),
-    deptos_sel=tuple(),
-    mtime_lineas=mtime_lineas,
+
+# =========================================================
+# CONSULTAS PRINCIPALES
+# =========================================================
+
+metricas_filtradas_df = consultar_metricas_filtradas(
+    rubro_sel, fecha_ini, fecha_fin, semestre_sel, centrales_tuple, deptos_tuple, mtime_lineas, codigos_validos
 )
 
-df_raw = consultar_lineas_duckdb(
-    rubro=rubro_sel,
-    fecha_ini=fecha_ini,
-    fecha_fin=fecha_fin,
-    semestre_sel=semestre_sel,
-    centrales_sel=centrales_tuple,
-    deptos_sel=deptos_tuple,
-    mtime_lineas=mtime_lineas,
+volumen_total_df, volumen_rape_df = consultar_metricas_totales(
+    rubro_sel, fecha_ini, fecha_fin, semestre_sel, mtime_lineas, codigos_validos
 )
 
-df_total = preparar_df_lineas(df_total_raw, codigos_validos)
-df = preparar_df_lineas(df_raw, codigos_validos)
+ranking_base = consultar_ranking_base(
+    rubro_sel, fecha_ini, fecha_fin, semestre_sel, centrales_tuple, deptos_tuple, mtime_lineas, codigos_validos
+)
 
-df_rape_base = df_total[df_total["DEPARTAMENTO_ORIGEN_NORM"].isin(DEPTOS_RAPE)].copy()
+moda_precios = consultar_moda_precios(
+    rubro_sel, fecha_ini, fecha_fin, semestre_sel, centrales_tuple, deptos_tuple, mtime_lineas, codigos_validos
+)
+
+serie_mensual = consultar_serie_mensual(
+    rubro_sel, fecha_ini, fecha_fin, semestre_sel, centrales_tuple, deptos_tuple, mtime_lineas, codigos_validos
+)
+
+flujos_mapa = consultar_flujos_mapa(
+    rubro_sel, fecha_ini, fecha_fin, semestre_sel, centrales_tuple, deptos_tuple, mtime_lineas, codigos_validos
+)
+
+sankey_base = consultar_sankey_base(
+    rubro_sel, fecha_ini, fecha_fin, semestre_sel, centrales_tuple, deptos_tuple, mtime_lineas, codigos_validos
+)
+
+precio_ref = float(metricas_filtradas_df.loc[0, "precio_ref"]) if not metricas_filtradas_df.empty and pd.notna(metricas_filtradas_df.loc[0, "precio_ref"]) else 0
+volumen_total_filtro = float(metricas_filtradas_df.loc[0, "volumen_total_filtro"]) if not metricas_filtradas_df.empty and pd.notna(metricas_filtradas_df.loc[0, "volumen_total_filtro"]) else 0
+municipios_activos = int(metricas_filtradas_df.loc[0, "municipios_activos"]) if not metricas_filtradas_df.empty and pd.notna(metricas_filtradas_df.loc[0, "municipios_activos"]) else 0
+centrales_activas = int(metricas_filtradas_df.loc[0, "centrales_activas"]) if not metricas_filtradas_df.empty and pd.notna(metricas_filtradas_df.loc[0, "centrales_activas"]) else 0
+
+volumen_total_total = float(volumen_total_df.loc[0, "volumen_total_total"]) if not volumen_total_df.empty and pd.notna(volumen_total_df.loc[0, "volumen_total_total"]) else 0
+volumen_total_rape = float(volumen_rape_df.loc[0, "volumen_total_rape"]) if not volumen_rape_df.empty and pd.notna(volumen_rape_df.loc[0, "volumen_total_rape"]) else 0
 
 if centrales_sel:
     destino_label = ", ".join(centrales_sel)
@@ -762,42 +918,10 @@ else:
 # AGREGACIONES PRINCIPALES
 # =========================================================
 
-if not df.empty:
-    precio_ref = df["PRECIO_PROMEDIO"].mean()
-    volumen_total_filtro = df["TONELADAS"].sum()
-    volumen_total_total = df_total["TONELADAS"].sum()
-    volumen_total_rape = df_rape_base["TONELADAS"].sum()
+if not ranking_base.empty:
+    ranking = ranking_base.merge(moda_precios, on="codigo_origen", how="left")
 
-    municipios_activos = df["codigo_origen"].nunique()
-    centrales_activas = df["codigo_destino"].nunique()
-
-    ranking = (
-        df.groupby(
-            ["codigo_origen", "MUNICIPIO_ORIGEN", "DEPARTAMENTO_ORIGEN"],
-            as_index=False
-        )
-        .agg(
-            toneladas_total=("TONELADAS", "sum"),
-            precio_promedio=("PRECIO_PROMEDIO", "mean"),
-            precio_moda=("PRECIO_PROMEDIO", moda_numerica),
-            dias_con_datos=("DIAS_CON_DATOS", "sum"),
-            meses_participacion=("periodo_mes", "nunique")
-        )
-    )
-
-    recursos_por_municipio = (
-        df.assign(valor_mensual_aprox=df["PRECIO_PROMEDIO"] * df["TONELADAS"])
-        .groupby("codigo_origen", as_index=False)
-        .agg(recursos_movilizados_aprox=("valor_mensual_aprox", "sum"))
-    )
-
-    ranking = ranking.merge(
-        recursos_por_municipio,
-        on="codigo_origen",
-        how="left"
-    )
-
-    total_meses = max(df["periodo_mes"].nunique(), 1)
+    total_meses = max(serie_mensual["periodo_mes"].nunique(), 1)
 
     ranking["participacion_filtro_pct"] = np.where(
         volumen_total_filtro > 0,
@@ -843,7 +967,6 @@ if not df.empty:
     ).reset_index(drop=True)
 
     ranking["ranking"] = ranking.index + 1
-
     municipios_eficientes = ranking.copy()
 
     top30_codigos = set(
@@ -853,38 +976,7 @@ if not df.empty:
         .tolist()
     )
 
-    serie_mensual = (
-        df.groupby("periodo_mes", as_index=False)
-        .agg(
-            precio_promedio=("PRECIO_PROMEDIO", "mean"),
-            toneladas_total=("TONELADAS", "sum")
-        )
-        .sort_values("periodo_mes")
-    )
-    serie_mensual["etiqueta_mes"] = serie_mensual["periodo_mes"].dt.strftime("%Y-%m")
-
-    flujos_mapa = (
-        df.groupby(
-            [
-                "codigo_origen", "MUNICIPIO_ORIGEN", "DEPARTAMENTO_ORIGEN",
-                "CENTRAL_NOMBRE", "codigo_destino",
-                "LONGITUD_ORIGEN", "LATITUD_ORIGEN",
-                "LONGITUD_DESTINO", "LATITUD_DESTINO"
-            ],
-            as_index=False
-        )
-        .agg(
-            toneladas_total=("TONELADAS", "sum"),
-            precio_promedio=("PRECIO_PROMEDIO", "mean")
-        )
-        .sort_values("toneladas_total", ascending=False)
-        .head(max_lineas)
-        .copy()
-    )
-
-    flujos_mapa = flujos_mapa.dropna(
-        subset=["LONGITUD_ORIGEN", "LATITUD_ORIGEN", "LONGITUD_DESTINO", "LATITUD_DESTINO"]
-    ).copy()
+    flujos_mapa = filtrar_flujos_por_cobertura(flujos_mapa, cobertura_flujos, max_lineas)
 
     if not flujos_mapa.empty:
         vmin = flujos_mapa["toneladas_total"].min()
@@ -898,33 +990,23 @@ if not df.empty:
         flujos_mapa["toneladas_fmt"] = flujos_mapa["toneladas_total"].map(formatear_ton)
         flujos_mapa["precio_fmt"] = flujos_mapa["precio_promedio"].map(formatear_cop)
 
-    sankey_base = (
-        df.groupby(["MUNICIPIO_ORIGEN", "CENTRAL_NOMBRE"], as_index=False)
-        .agg(toneladas_total=("TONELADAS", "sum"))
-        .sort_values("toneladas_total", ascending=False)
-    )
-
-    top_municipios_sankey = (
-        df.groupby(["MUNICIPIO_ORIGEN"], as_index=False)
-        .agg(toneladas_total=("TONELADAS", "sum"))
-        .sort_values("toneladas_total", ascending=False)
-        .head(12)["MUNICIPIO_ORIGEN"]
-        .tolist()
-    )
-
-    sankey_top = sankey_base[sankey_base["MUNICIPIO_ORIGEN"].isin(top_municipios_sankey)].copy()
+    if not sankey_base.empty:
+        top_municipios_sankey = (
+            sankey_base.groupby("MUNICIPIO_ORIGEN", as_index=False)
+            .agg(toneladas_total=("toneladas_total", "sum"))
+            .sort_values("toneladas_total", ascending=False)
+            .head(12)["MUNICIPIO_ORIGEN"]
+            .tolist()
+        )
+        sankey_top = sankey_base[sankey_base["MUNICIPIO_ORIGEN"].isin(top_municipios_sankey)].copy()
+    else:
+        sankey_top = pd.DataFrame(columns=["MUNICIPIO_ORIGEN", "CENTRAL_NOMBRE", "toneladas_total"])
 
 else:
-    precio_ref = 0
-    volumen_total_filtro = 0
-    volumen_total_total = 0
-    volumen_total_rape = 0
-    municipios_activos = 0
-    centrales_activas = 0
     ranking = pd.DataFrame()
     municipios_eficientes = pd.DataFrame()
     top30_codigos = set()
-    serie_mensual = pd.DataFrame(columns=["periodo_mes", "precio_promedio", "toneladas_total", "etiqueta_mes"])
+    serie_mensual = pd.DataFrame(columns=["periodo_mes", "etiqueta_mes", "precio_promedio", "toneladas_total"])
     flujos_mapa = pd.DataFrame()
     sankey_top = pd.DataFrame(columns=["MUNICIPIO_ORIGEN", "CENTRAL_NOMBRE", "toneladas_total"])
 
@@ -1105,18 +1187,16 @@ with left_col:
 
     st.markdown('<div class="panel-title">Leyenda</div>', unsafe_allow_html=True)
     st.markdown("""
-        <div class="legend-item"><span class="legend-box" style="background:#6E44FF;"></span>Top 30 abastecedores</div>
-        <div class="legend-item"><span class="legend-box" style="background:#EB5757;"></span>Alta eficiencia</div>
-        <div class="legend-item"><span class="legend-box" style="background:#4191FF;"></span>Eficiencia media</div>
-        <div class="legend-item"><span class="legend-box" style="background:#F5B041;"></span>Arcos de flujo OD</div>
-        <div class="legend-item"><span class="legend-box" style="background:#00D2FF;"></span>Central mayorista</div>
-    """, unsafe_allow_html=True)
+    <div class="legend-item"><span class="legend-box" style="background:#6E44FF;"></span>Top 30 abastecedores</div>
+    <div class="legend-item"><span class="legend-box" style="background:#F5B041;"></span>Arcos de flujo OD</div>
+    <div class="legend-item"><span class="legend-box" style="background:#00D2FF;"></span>Central mayorista</div>
+""", unsafe_allow_html=True)
 
     st.markdown(
         """
         <div class="small-note">
             Los municipios morados corresponden a los 30 principales abastecedores del filtro actual.
-            Cambian cuando cambian rubro, fechas, semestre, central mayorista o departamento.
+            Los arcos muestran los flujos origen-destino hacia las centrales mayoristas bajo los filtros activos.
         </div>
         """,
         unsafe_allow_html=True
@@ -1280,13 +1360,13 @@ with center_col:
 with right_col:
     st.markdown('<div class="panel">', unsafe_allow_html=True)
 
-    st.markdown('<div class="panel-title">Sankey origen - central mayorista</div>', unsafe_allow_html=True)
+    st.markdown('<div class="panel-title">Volumen de abastecimiento a las centrales mayoristas</div>', unsafe_allow_html=True)
 
     if not sankey_top.empty:
         sankey_fig = construir_sankey(sankey_top)
         st.plotly_chart(sankey_fig, use_container_width=True)
     else:
-        st.info("No hay datos suficientes para el Sankey.")
+        st.info("No hay datos suficientes para mostrar.")
 
     st.markdown('<div class="panel-title" style="margin-top:0.9rem;">Contexto interpretativo</div>', unsafe_allow_html=True)
 
