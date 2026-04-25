@@ -827,6 +827,37 @@ deptos_tuple = tuple(deptos_sel)
 # ya no necesitas la variable moda_precios separada
 
 # =========================================================
+# EXTRACCIÓN DE ESCALARES
+# =========================================================
+
+def _safe_float(df, col):
+    try:
+        val = df.loc[0, col]
+        return float(val) if pd.notna(val) else 0.0
+    except Exception:
+        return 0.0
+
+def _safe_int(df, col):
+    try:
+        val = df.loc[0, col]
+        return int(val) if pd.notna(val) else 0
+    except Exception:
+        return 0
+
+precio_ref           = _safe_float(metricas_filtradas_df, "precio_ref")
+volumen_total_filtro = _safe_float(metricas_filtradas_df, "volumen_total_filtro")
+municipios_activos   = _safe_int(metricas_filtradas_df,   "municipios_activos")
+centrales_activas    = _safe_int(metricas_filtradas_df,   "centrales_activas")
+
+volumen_total_total  = _safe_float(volumen_total_df,  "volumen_total_total")
+volumen_total_rape   = _safe_float(volumen_rape_df,   "volumen_total_rape")
+
+if centrales_sel:
+    destino_label = ", ".join(centrales_sel)
+else:
+    destino_label = "todas las centrales mayoristas seleccionadas"
+
+# =========================================================
 # FILTRO DE PUNTOS ORIGEN
 # =========================================================
 
