@@ -1132,364 +1132,202 @@ NOMBRES_COLUMNAS_PRESENTABLES = {
 
 
 # =========================================================
-# LAYOUT PRINCIPAL
+# LAYOUT PRINCIPAL CON FRAGMENTOS
 # =========================================================
 
-left_col, center_col, right_col = st.columns([1.05, 3.8, 1.45], gap="small")
 
+@st.fragment
+def render_layout_principal(
+    volumen_total_filtro, precio_ref, municipios_activos, centrales_activas,
+    municipios_web, flujos_mapa, puntos_origen_agg, puntos_destino_f, serie_mensual,
+    sankey_top, municipios_eficientes, rubro_sel, destino_label,
+    fecha_ini, fecha_fin, semestre_sel
+):
+    left_col, center_col, right_col = st.columns([1.05, 3.8, 1.45], gap="small")
 
-# =========================================================
-# COLUMNA IZQUIERDA
-# =========================================================
-
-with left_col:
-    st.markdown('<div class="panel">', unsafe_allow_html=True)
-    st.markdown('<div class="panel-title">Indicadores principales</div>', unsafe_allow_html=True)
-
-    st.markdown(
-        f"""
-        <div class="metric-card">
-            <div class="metric-label">Toneladas abastecidas</div>
-            <div class="metric-value">{volumen_total_filtro:,.0f}</div>
-            <div class="metric-small">Periodo filtrado</div>
-        </div>
-
-        <div class="metric-card">
-            <div class="metric-label">Precio promedio</div>
-            <div class="metric-value" style="font-size:1.65rem;">{formatear_cop(precio_ref)}</div>
-            <div class="metric-small">Mercado filtrado</div>
-        </div>
-
-        <div class="metric-card">
-            <div class="metric-label">Municipios origen activos</div>
-            <div class="metric-value">{municipios_activos}</div>
-            <div class="metric-small">Con flujo válido</div>
-        </div>
-
-        <div class="metric-card">
-            <div class="metric-label">Centrales activas</div>
-            <div class="metric-value">{centrales_activas}</div>
-            <div class="metric-small">Bajo filtros actuales</div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    st.markdown('<div class="panel-title">Leyenda</div>', unsafe_allow_html=True)
-    st.markdown("""
-    <div class="legend-item"><span class="legend-box" style="background:#6E44FF;"></span>Top 30 abastecedores</div>
-    <div class="legend-item"><span class="legend-box" style="background:#F5B041;"></span>Arcos de flujo OD</div>
-    <div class="legend-item"><span class="legend-box" style="background:#00D2FF;"></span>Central mayorista</div>
-""", unsafe_allow_html=True)
-
-    st.markdown(
-        """
-        <div class="small-note">
-            Los municipios morados corresponden a los 30 principales abastecedores del filtro actual.
-            Los arcos muestran los flujos origen-destino hacia las centrales mayoristas bajo los filtros activos.
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
-
-
-# =========================================================
-# COLUMNA CENTRAL
-# =========================================================
-
-with center_col:
-    st.markdown('<div class="panel-title">Mapa de flujos de abastecimiento</div>', unsafe_allow_html=True)
-
-    layers = []
-
-    municipios_web_reducido = municipios_web[
-        ["fill_color", "line_color", "tipo_elemento", "detalle_1", "detalle_2", "detalle_3", "detalle_4", "geometry"]
-    ].copy()
-
-    geojson_municipios = json.loads(municipios_web_reducido.to_json())
-
-    layers.append(
-        pdk.Layer(
-            "GeoJsonLayer",
-            data=geojson_municipios,
-            stroked=True,
-            filled=True,
-            extruded=False,
-            wireframe=False,
-            get_fill_color="properties.fill_color",
-            get_line_color="properties.line_color",
-            line_width_min_pixels=1.0,
-            pickable=True,
-            auto_highlight=True
+    with left_col:
+        st.markdown('<div class="panel">', unsafe_allow_html=True)
+        st.markdown('<div class="panel-title">Indicadores principales</div>', unsafe_allow_html=True)
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-label">Toneladas abastecidas</div>
+                <div class="metric-value">{volumen_total_filtro:,.0f}</div>
+                <div class="metric-small">Periodo filtrado</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Precio promedio</div>
+                <div class="metric-value" style="font-size:1.65rem;">{formatear_cop(precio_ref)}</div>
+                <div class="metric-small">Mercado filtrado</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Municipios origen activos</div>
+                <div class="metric-value">{municipios_activos}</div>
+                <div class="metric-small">Con flujo válido</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Centrales activas</div>
+                <div class="metric-value">{centrales_activas}</div>
+                <div class="metric-small">Bajo filtros actuales</div>
+            </div>
+            """,
+            unsafe_allow_html=True
         )
-    )
+        st.markdown('<div class="panel-title">Leyenda</div>', unsafe_allow_html=True)
+        st.markdown("""
+        <div class="legend-item"><span class="legend-box" style="background:#6E44FF;"></span>Top 30 abastecedores</div>
+        <div class="legend-item"><span class="legend-box" style="background:#F5B041;"></span>Arcos de flujo OD</div>
+        <div class="legend-item"><span class="legend-box" style="background:#00D2FF;"></span>Central mayorista</div>
+        """, unsafe_allow_html=True)
+        st.markdown(
+            """
+            <div class="small-note">
+                Los municipios morados corresponden a los 30 principales abastecedores del filtro actual.
+                Los arcos muestran los flujos origen-destino hacia las centrales mayoristas bajo los filtros activos.
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    if not flujos_mapa.empty:
-        layers.append(
-            pdk.Layer(
-                "ArcLayer",
-                data=flujos_mapa,
+    with center_col:
+        st.markdown('<div class="panel-title">Mapa de flujos de abastecimiento</div>', unsafe_allow_html=True)
+        layers = []
+        municipios_web_reducido = municipios_web[
+            ["fill_color", "line_color", "tipo_elemento", "detalle_1", "detalle_2", "detalle_3", "detalle_4", "geometry"]
+        ].copy()
+        geojson_municipios = json.loads(municipios_web_reducido.to_json())
+        layers.append(pdk.Layer("GeoJsonLayer", data=geojson_municipios, stroked=True, filled=True,
+            extruded=False, wireframe=False, get_fill_color="properties.fill_color",
+            get_line_color="properties.line_color", line_width_min_pixels=1.0, pickable=True, auto_highlight=True))
+        if not flujos_mapa.empty:
+            layers.append(pdk.Layer("ArcLayer", data=flujos_mapa,
                 get_source_position=["LONGITUD_ORIGEN", "LATITUD_ORIGEN"],
                 get_target_position=["LONGITUD_DESTINO", "LATITUD_DESTINO"],
-                get_source_color=[245, 176, 65, 190],
-                get_target_color=[0, 210, 255, 190],
-                get_width="ancho_linea",
-                width_scale=1,
-                width_min_pixels=1,
-                pickable=True,
-                auto_highlight=True
-            )
+                get_source_color=[245, 176, 65, 190], get_target_color=[0, 210, 255, 190],
+                get_width="ancho_linea", width_scale=1, width_min_pixels=1, pickable=True, auto_highlight=True))
+        if not puntos_origen_agg.empty:
+            layers.append(pdk.Layer("ScatterplotLayer", data=puntos_origen_agg,
+                get_position="[lon, lat]", get_radius=4200,
+                get_fill_color=[255, 160, 0, 120], get_line_color=[255, 210, 120, 200],
+                line_width_min_pixels=1, pickable=True))
+        if not puntos_destino_f.empty:
+            layers.append(pdk.Layer("ScatterplotLayer", data=puntos_destino_f,
+                get_position="[LONGITUD, LATITUD]", get_radius=13500,
+                get_fill_color=[0, 210, 255, 190], get_line_color=[170, 245, 255, 255],
+                line_width_min_pixels=2, pickable=True))
+        deck = pdk.Deck(
+            layers=layers,
+            initial_view_state=pdk.ViewState(latitude=4.5, longitude=-74.1, zoom=4.6, pitch=0),
+            tooltip={"html": "<b>{tipo_elemento}</b><br/>{detalle_1}<br/>{detalle_2}<br/>{detalle_3}<br/>{detalle_4}",
+                "style": {"backgroundColor": "rgba(18,22,29,0.95)", "color": "#F5F7FA", "fontSize": "12px"}},
+            map_style="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
         )
+        st.pydeck_chart(deck, use_container_width=True)
+        st.markdown('<div class="panel-title" style="margin-top:0.65rem;">Serie mensual de precio y toneladas</div>', unsafe_allow_html=True)
+        if not serie_mensual.empty:
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=serie_mensual["etiqueta_mes"], y=serie_mensual["precio_promedio"],
+                name="Precio promedio", marker_color="#4DA3FF", yaxis="y1",
+                hovertemplate="Mes: %{x}<br>Precio: $%{y:,.0f}<extra></extra>"))
+            fig.add_trace(go.Scatter(x=serie_mensual["etiqueta_mes"], y=serie_mensual["toneladas_total"],
+                name="Toneladas", mode="lines+markers", line=dict(color="#F5B041", width=2.5),
+                marker=dict(size=6, color="#F5B041"), yaxis="y2",
+                hovertemplate="Mes: %{x}<br>Toneladas: %{y:,.1f}<extra></extra>"))
+            fig.update_layout(template="plotly_dark", paper_bgcolor="#171A21", plot_bgcolor="#171A21",
+                margin=dict(l=15, r=15, t=10, b=10), height=300,
+                legend=dict(orientation="h", y=1.08, x=0), xaxis=dict(showgrid=False),
+                yaxis=dict(title="Precio", gridcolor="#2B3240"),
+                yaxis2=dict(title="Toneladas", overlaying="y", side="right", showgrid=False))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No hay datos para la serie mensual con los filtros actuales.")
 
-    if not puntos_origen_agg.empty:
-        layers.append(
-            pdk.Layer(
-                "ScatterplotLayer",
-                data=puntos_origen_agg,
-                get_position="[lon, lat]",
-                get_radius=4200,
-                get_fill_color=[255, 160, 0, 120],
-                get_line_color=[255, 210, 120, 200],
-                line_width_min_pixels=1,
-                pickable=True
-            )
-        )
+    with right_col:
+        st.markdown('<div class="panel">', unsafe_allow_html=True)
+        st.markdown('<div class="panel-title">Volumen de abastecimiento a las centrales mayoristas</div>', unsafe_allow_html=True)
+        if not sankey_top.empty:
+            sankey_fig = construir_sankey(sankey_top)
+            st.plotly_chart(sankey_fig, use_container_width=True)
+        else:
+            st.info("No hay datos suficientes para mostrar.")
+        st.markdown('<div class="panel-title" style="margin-top:0.9rem;">Contexto interpretativo</div>', unsafe_allow_html=True)
+        if not municipios_eficientes.empty:
+            texto_resumen = construir_texto_contexto(
+                municipios_eficientes, rubro_sel, destino_label, fecha_ini, fecha_fin, semestre_sel)
+            st.markdown(f"<div class='small-note'>{texto_resumen}</div>", unsafe_allow_html=True)
+        else:
+            st.markdown("<div class='small-note'>No se identificaron municipios con información suficiente para destacar eficiencia relativa en este filtro.</div>", unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    if not puntos_destino_f.empty:
-        layers.append(
-            pdk.Layer(
-                "ScatterplotLayer",
-                data=puntos_destino_f,
-                get_position="[LONGITUD, LATITUD]",
-                get_radius=13500,
-                get_fill_color=[0, 210, 255, 190],
-                get_line_color=[170, 245, 255, 255],
-                line_width_min_pixels=2,
-                pickable=True
-            )
-        )
 
-    deck = pdk.Deck(
-        layers=layers,
-        initial_view_state=pdk.ViewState(
-            latitude=4.5,
-            longitude=-74.1,
-            zoom=4.6,
-            pitch=0
-        ),
-        tooltip={
-            "html": """
-                <b>{tipo_elemento}</b><br/>
-                {detalle_1}<br/>
-                {detalle_2}<br/>
-                {detalle_3}<br/>
-                {detalle_4}
-            """,
-            "style": {
-                "backgroundColor": "rgba(18,22,29,0.95)",
-                "color": "#F5F7FA",
-                "fontSize": "12px"
-            }
-        },
-        map_style="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
-    )
-
-    st.pydeck_chart(deck, use_container_width=True)
-
-    st.markdown('<div class="panel-title" style="margin-top:0.65rem;">Serie mensual de precio y toneladas</div>', unsafe_allow_html=True)
-
-    if not serie_mensual.empty:
-        fig = go.Figure()
-
-        fig.add_trace(
-            go.Bar(
-                x=serie_mensual["etiqueta_mes"],
-                y=serie_mensual["precio_promedio"],
-                name="Precio promedio",
-                marker_color="#4DA3FF",
-                yaxis="y1",
-                hovertemplate="Mes: %{x}<br>Precio: $%{y:,.0f}<extra></extra>"
-            )
-        )
-
-        fig.add_trace(
-            go.Scatter(
-                x=serie_mensual["etiqueta_mes"],
-                y=serie_mensual["toneladas_total"],
-                name="Toneladas",
-                mode="lines+markers",
-                line=dict(color="#F5B041", width=2.5),
-                marker=dict(size=6, color="#F5B041"),
-                yaxis="y2",
-                hovertemplate="Mes: %{x}<br>Toneladas: %{y:,.1f}<extra></extra>"
-            )
-        )
-
-        fig.update_layout(
-            template="plotly_dark",
-            paper_bgcolor="#171A21",
-            plot_bgcolor="#171A21",
-            margin=dict(l=15, r=15, t=10, b=10),
-            height=300,
-            legend=dict(orientation="h", y=1.08, x=0),
-            xaxis=dict(showgrid=False),
-            yaxis=dict(title="Precio", gridcolor="#2B3240"),
-            yaxis2=dict(title="Toneladas", overlaying="y", side="right", showgrid=False)
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
+@st.fragment
+def render_tabla(ranking, max_filas_tabla):
+    st.markdown('<div class="panel-title" style="margin-top:0.8rem;">Tabla consolidada de análisis</div>', unsafe_allow_html=True)
+    if not ranking.empty:
+        tabla_consolidada = ranking[["ranking", "MUNICIPIO_ORIGEN", "DEPARTAMENTO_ORIGEN",
+            "precio_promedio", "precio_moda", "toneladas_total", "recursos_movilizados_aprox",
+            "meses_participacion", "participacion_filtro_pct", "participacion_total_pct",
+            "participacion_rape_pct", "ventaja_precio_pct", "indice_eficiencia"]].copy()
+        tabla_consolidada = tabla_consolidada.rename(columns={
+            "MUNICIPIO_ORIGEN": "municipio_origen", "DEPARTAMENTO_ORIGEN": "departamento_origen",
+            "precio_promedio": "precio_promedio_municipio", "precio_moda": "precio_moda"})
+        tabla_consolidada["precio_promedio_municipio"] = tabla_consolidada["precio_promedio_municipio"].map(lambda x: f"$ {x:,.0f} COP")
+        tabla_consolidada["precio_moda"] = tabla_consolidada["precio_moda"].map(lambda x: f"$ {x:,.0f} COP" if pd.notna(x) else "Sin dato")
+        tabla_consolidada["toneladas_total"] = tabla_consolidada["toneladas_total"].map(lambda x: f"{x:,.1f}")
+        tabla_consolidada["recursos_movilizados_aprox"] = tabla_consolidada["recursos_movilizados_aprox"].map(lambda x: f"$ {x:,.0f} COP" if pd.notna(x) else "Sin dato")
+        tabla_consolidada["participacion_filtro_pct"] = tabla_consolidada["participacion_filtro_pct"].map(lambda x: f"{x:.1f}%")
+        tabla_consolidada["participacion_total_pct"] = tabla_consolidada["participacion_total_pct"].map(lambda x: f"{x:.1f}%")
+        tabla_consolidada["participacion_rape_pct"] = tabla_consolidada["participacion_rape_pct"].map(lambda x: f"{x:.1f}%")
+        tabla_consolidada["ventaja_precio_pct"] = tabla_consolidada["ventaja_precio_pct"].map(lambda x: f"{x:.1f}%")
+        tabla_consolidada["indice_eficiencia"] = tabla_consolidada["indice_eficiencia"].map(lambda x: f"{x:.2f}")
+        tabla_consolidada = tabla_consolidada.rename(columns=NOMBRES_COLUMNAS_PRESENTABLES)
+        tabla_consolidada = tabla_consolidada.head(max_filas_tabla)
+        st.dataframe(tabla_consolidada, use_container_width=True, hide_index=True, height=420)
     else:
-        st.info("No hay datos para la serie mensual con los filtros actuales.")
-
-
-# =========================================================
-# COLUMNA DERECHA
-# =========================================================
-
-with right_col:
-    st.markdown('<div class="panel">', unsafe_allow_html=True)
-
-    st.markdown('<div class="panel-title">Volumen de abastecimiento a las centrales mayoristas</div>', unsafe_allow_html=True)
-
-    if not sankey_top.empty:
-        sankey_fig = construir_sankey(sankey_top)
-        st.plotly_chart(sankey_fig, use_container_width=True)
-    else:
-        st.info("No hay datos suficientes para mostrar.")
-
-    st.markdown('<div class="panel-title" style="margin-top:0.9rem;">Contexto interpretativo</div>', unsafe_allow_html=True)
-
-    if not municipios_eficientes.empty:
-        texto_resumen = construir_texto_contexto(
-            municipios_eficientes,
-            rubro_sel,
-            destino_label,
-            fecha_ini,
-            fecha_fin,
-            semestre_sel
-        )
-        st.markdown(
-            f"<div class='small-note'>{texto_resumen}</div>",
-            unsafe_allow_html=True
-        )
-    else:
-        st.markdown(
-            "<div class='small-note'>No se identificaron municipios con información suficiente para destacar eficiencia relativa en este filtro.</div>",
-            unsafe_allow_html=True
-        )
-
-    st.markdown('</div>', unsafe_allow_html=True)
-
-
-# =========================================================
-# TABLA CONSOLIDADA A TODO EL ANCHO
-# =========================================================
-
-st.markdown('<div class="panel-title" style="margin-top:0.8rem;">Tabla consolidada de análisis</div>', unsafe_allow_html=True)
-
-if not ranking.empty:
-    tabla_consolidada = ranking[
-        [
-            "ranking",
-            "MUNICIPIO_ORIGEN",
-            "DEPARTAMENTO_ORIGEN",
-            "precio_promedio",
-            "precio_moda",
-            "toneladas_total",
-            "recursos_movilizados_aprox",
-            "meses_participacion",
-            "participacion_filtro_pct",
-            "participacion_total_pct",
-            "participacion_rape_pct",
-            "ventaja_precio_pct",
-            "indice_eficiencia"
-        ]
-    ].copy()
-
-    tabla_consolidada = tabla_consolidada.rename(columns={
-        "MUNICIPIO_ORIGEN": "municipio_origen",
-        "DEPARTAMENTO_ORIGEN": "departamento_origen",
-        "precio_promedio": "precio_promedio_municipio",
-        "precio_moda": "precio_moda"
-    })
-
-    tabla_consolidada["precio_promedio_municipio"] = tabla_consolidada["precio_promedio_municipio"].map(
-        lambda x: f"$ {x:,.0f} COP"
-    )
-    tabla_consolidada["precio_moda"] = tabla_consolidada["precio_moda"].map(
-        lambda x: f"$ {x:,.0f} COP" if pd.notna(x) else "Sin dato"
-    )
-    tabla_consolidada["toneladas_total"] = tabla_consolidada["toneladas_total"].map(
-        lambda x: f"{x:,.1f}"
-    )
-    tabla_consolidada["recursos_movilizados_aprox"] = tabla_consolidada["recursos_movilizados_aprox"].map(
-        lambda x: f"$ {x:,.0f} COP" if pd.notna(x) else "Sin dato"
-    )
-    tabla_consolidada["participacion_filtro_pct"] = tabla_consolidada["participacion_filtro_pct"].map(
-        lambda x: f"{x:.1f}%"
-    )
-    tabla_consolidada["participacion_total_pct"] = tabla_consolidada["participacion_total_pct"].map(
-        lambda x: f"{x:.1f}%"
-    )
-    tabla_consolidada["participacion_rape_pct"] = tabla_consolidada["participacion_rape_pct"].map(
-        lambda x: f"{x:.1f}%"
-    )
-    tabla_consolidada["ventaja_precio_pct"] = tabla_consolidada["ventaja_precio_pct"].map(
-        lambda x: f"{x:.1f}%"
-    )
-    tabla_consolidada["indice_eficiencia"] = tabla_consolidada["indice_eficiencia"].map(
-        lambda x: f"{x:.2f}"
-    )
-
-    tabla_consolidada = tabla_consolidada.rename(columns=NOMBRES_COLUMNAS_PRESENTABLES)
-    tabla_consolidada = tabla_consolidada.head(max_filas_tabla)
-
-    st.dataframe(
-        tabla_consolidada,
-        use_container_width=True,
-        hide_index=True,
-        height=420
-    )
-else:
-    st.info("No hay información disponible para la tabla consolidada.")
-
-
-# =========================================================
-# NOTA METODOLÓGICA A TODO EL ANCHO
-# =========================================================
-
-st.markdown(
-    """
+        st.info("No hay información disponible para la tabla consolidada.")
+    st.markdown("""
     <div class="method-note">
         <b>Cómo se calcula el índice de eficiencia:</b><br>
         El índice compara municipios de origen únicamente dentro del subconjunto filtrado por rubro,
         central mayorista, periodo y demás filtros activos. Combina tres dimensiones normalizadas:
         ventaja de precio frente al promedio del mercado filtrado, volumen acumulado abastecido y número
-        de meses con participación. La ponderación usada es 40% precio, 40% volumen y 20% estabilidad operativa.
+        de meses con participación. La ponderación usada es 40%% precio, 40%% volumen y 20%% estabilidad operativa.
         <br>
     </div>
-    """,
-    unsafe_allow_html=True
-)
-
-
-# =========================================================
-# PIE
-# =========================================================
-
-st.markdown(
-    """
-    <div style="
-        margin-top:0.8rem;
-        padding-top:0.6rem;
-        border-top:1px solid #2B3240;
-        color:#8FA0B7;
-        font-size:0.8rem;
-        text-align:center;
-    ">
+    """, unsafe_allow_html=True)
+    st.markdown("""
+    <div style="margin-top:0.8rem; padding-top:0.6rem; border-top:1px solid #2B3240;
+        color:#8FA0B7; font-size:0.8rem; text-align:center;">
         Fuente de información: Sistema de Información de Precios y Abastecimiento del Sector Agropecuario (SIPSA) del DANE, periodo 2020 - 2024.
     </div>
-    """,
-    unsafe_allow_html=True
+    """, unsafe_allow_html=True)
+
+
+# =========================================================
+# LLAMADA A LOS FRAGMENTOS
+# =========================================================
+
+render_layout_principal(
+    volumen_total_filtro=volumen_total_filtro,
+    precio_ref=precio_ref,
+    municipios_activos=municipios_activos,
+    centrales_activas=centrales_activas,
+    municipios_web=municipios_web,
+    flujos_mapa=flujos_mapa,
+    puntos_origen_agg=puntos_origen_agg,
+    puntos_destino_f=puntos_destino_f,
+    serie_mensual=serie_mensual,
+    sankey_top=sankey_top,
+    municipios_eficientes=municipios_eficientes,
+    rubro_sel=rubro_sel,
+    destino_label=destino_label,
+    fecha_ini=fecha_ini,
+    fecha_fin=fecha_fin,
+    semestre_sel=semestre_sel,
+)
+
+render_tabla(
+    ranking=ranking,
+    max_filas_tabla=max_filas_tabla,
 )
