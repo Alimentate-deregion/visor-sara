@@ -373,22 +373,17 @@ def filtrar_flujos_por_cobertura(df_flujos, cobertura_pct, max_lineas):
 
 
 # =========================================================
-# CARGA DE CAPAS ESTÁTICAS
+# CARGA Y PREPARACIÓN DE CAPAS ESTÁTICAS (UNIFICADA)
 # =========================================================
 
-@st.cache_data(show_spinner=False)
-def cargar_capas_estaticas(mtime_municipios, mtime_destino, mtime_origen):
+@st.cache_resource(show_spinner=False)
+def cargar_y_preparar_capas_estaticas(mtime_municipios, mtime_destino, mtime_origen):
+    # --- Carga desde disco ---
     municipios = gpd.read_parquet(RUTA_MUNICIPIOS)
     puntos_destino = gpd.read_file(RUTA_PUNTOS_DESTINO)
     puntos_origen = gpd.read_file(RUTA_PUNTOS_ORIGEN)
-    return municipios, puntos_destino, puntos_origen
 
-
-# =========================================================
-# PREPARACIÓN DE CAPAS ESTÁTICAS
-# =========================================================
-
-def preparar_capas_estaticas(municipios, puntos_destino, puntos_origen):
+    # --- Normalización de municipios ---
     municipios = municipios.copy()
     puntos_destino = puntos_destino.copy()
     puntos_origen = puntos_origen.copy()
@@ -430,10 +425,12 @@ def preparar_capas_estaticas(municipios, puntos_destino, puntos_origen):
     else:
         municipios["departamento"] = ""
 
+    # --- Normalización de puntos_destino ---
     puntos_destino["codigo_destino"] = puntos_destino["CODIGO_MUNICIPIO"].apply(normalizar_codigo_5)
     puntos_destino["NOMBRE_CENTRAL"] = puntos_destino["NOMBRE_CENTRAL"].apply(normalizar_texto)
     puntos_destino["CIUDAD"] = puntos_destino["CIUDAD"].apply(normalizar_texto)
 
+    # --- Normalización de puntos_origen ---
     puntos_origen["FECHA"] = pd.to_datetime(puntos_origen["FECHA"], errors="coerce")
 
     for col in ["RUBRO", "DEPARTAMENTO_ORIGEN", "MUNICIPIO_ORIGEN", "CENTRAL_NOMBRE"]:
@@ -477,7 +474,6 @@ def preparar_capas_estaticas(municipios, puntos_destino, puntos_origen):
     puntos_origen = puntos_origen[puntos_origen["codigo_origen"].isin(codigos_validos)].copy()
 
     return municipios, puntos_destino, puntos_origen, codigos_validos
-
 
 # =========================================================
 # CONEXIÓN DUCKDB Y VISTA LIMPIA
@@ -540,36 +536,32 @@ def get_duckdb_connection(mtime_lineas, codigos_validos):
 # CONSULTAS DUCKDB
 # =========================================================
 
+# =========================================================
+# CONSULTAS DUCKDB
+# =========================================================
+
 @st.cache_data(show_spinner=False)
 def consultar_catalogos_lineas(mtime_lineas, codigos_validos):
+    """Consulta de catálogos: se ejecuta una sola vez por sesión."""
     con = get_duckdb_connection(mtime_lineas, codigos_validos)
 
     rubros = con.execute("""
-        SELECT DISTINCT RUBRO
-        FROM lineas
-        WHERE RUBRO IS NOT NULL
-        ORDER BY RUBRO
+        SELECT DISTINCT RUBRO FROM lineas
+        WHERE RUBRO IS NOT NULL ORDER BY RUBRO
     """).df()["RUBRO"].astype(str).tolist()
 
     centrales = con.execute("""
-        SELECT DISTINCT CENTRAL_NOMBRE
-        FROM lineas
-        WHERE CENTRAL_NOMBRE IS NOT NULL
-        ORDER BY CENTRAL_NOMBRE
+        SELECT DISTINCT CENTRAL_NOMBRE FROM lineas
+        WHERE CENTRAL_NOMBRE IS NOT NULL ORDER BY CENTRAL_NOMBRE
     """).df()["CENTRAL_NOMBRE"].astype(str).tolist()
 
     deptos = con.execute("""
-        SELECT DISTINCT DEPARTAMENTO_ORIGEN
-        FROM lineas
-        WHERE DEPARTAMENTO_ORIGEN IS NOT NULL
-        ORDER BY DEPARTAMENTO_ORIGEN
+        SELECT DISTINCT DEPARTAMENTO_ORIGEN FROM lineas
+        WHERE DEPARTAMENTO_ORIGEN IS NOT NULL ORDER BY DEPARTAMENTO_ORIGEN
     """).df()["DEPARTAMENTO_ORIGEN"].astype(str).tolist()
 
     rango_fechas = con.execute("""
-        SELECT
-            MIN(FECHA) AS fecha_min,
-            MAX(FECHA) AS fecha_max
-        FROM lineas
+        SELECT MIN(FECHA) AS fecha_min, MAX(FECHA) AS fecha_max FROM lineas
     """).df()
 
     fecha_min = pd.to_datetime(rango_fechas.loc[0, "fecha_min"]).date()
@@ -579,157 +571,155 @@ def consultar_catalogos_lineas(mtime_lineas, codigos_validos):
 
 
 @st.cache_data(show_spinner=False)
-def consultar_metricas_filtradas(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel, mtime_lineas, codigos_validos):
+def consultar_todo_filtrado(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel, mtime_lineas, codigos_validos):
+    """
+    UN SOLO escaneo del parquet de 119 MB por cambio de filtro.
+    Devuelve todos los datos que antes requerían 6 consultas separadas.
+    """
     con = get_duckdb_connection(mtime_lineas, codigos_validos)
     where_sql, params = construir_where_sql(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel)
 
-    query = f"""
-        SELECT
-            AVG(PRECIO_PROMEDIO) AS precio_ref,
-            SUM(TONELADAS) AS volumen_total_filtro,
-            COUNT(DISTINCT codigo_origen) AS municipios_activos,
-            COUNT(DISTINCT codigo_destino) AS centrales_activas
-        FROM lineas
-        WHERE {where_sql}
-    """
-
-    return con.execute(query, params).df()
-
-
-@st.cache_data(show_spinner=False)
-def consultar_metricas_totales(rubro, fecha_ini, fecha_fin, semestre_sel, mtime_lineas, codigos_validos):
-    con = get_duckdb_connection(mtime_lineas, codigos_validos)
-    where_sql, params = construir_where_sql(rubro, fecha_ini, fecha_fin, semestre_sel, tuple(), tuple())
-
-    volumen_total = con.execute(
-        f"SELECT SUM(TONELADAS) AS volumen_total_total FROM lineas WHERE {where_sql}",
-        params
-    ).df()
+    # Parámetros para métricas totales (sin filtro de central ni depto)
+    where_total_sql, params_total = construir_where_sql(
+        rubro, fecha_ini, fecha_fin, semestre_sel, tuple(), tuple()
+    )
 
     deptos_rape = list(DEPTOS_RAPE)
-    placeholders = ", ".join(["?"] * len(deptos_rape))
-    volumen_rape = con.execute(
-        f"""
-        SELECT SUM(TONELADAS) AS volumen_total_rape
-        FROM lineas
-        WHERE {where_sql}
-          AND DEPARTAMENTO_ORIGEN_NORM IN ({placeholders})
-        """,
-        params + deptos_rape
-    ).df()
-
-    return volumen_total, volumen_rape
-
-
-@st.cache_data(show_spinner=False)
-def consultar_ranking_base(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel, mtime_lineas, codigos_validos):
-    con = get_duckdb_connection(mtime_lineas, codigos_validos)
-    where_sql, params = construir_where_sql(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel)
+    placeholders_rape = ", ".join(["?" ] * len(deptos_rape))
 
     query = f"""
-        SELECT
-            codigo_origen,
-            MUNICIPIO_ORIGEN,
-            DEPARTAMENTO_ORIGEN,
-            SUM(TONELADAS) AS toneladas_total,
-            AVG(PRECIO_PROMEDIO) AS precio_promedio,
-            SUM(DIAS_CON_DATOS) AS dias_con_datos,
-            COUNT(DISTINCT periodo_mes) AS meses_participacion,
-            SUM(PRECIO_PROMEDIO * TONELADAS) AS recursos_movilizados_aprox
-        FROM lineas
-        WHERE {where_sql}
-        GROUP BY 1, 2, 3
+        -- CTE base: escanea el parquet UNA SOLA VEZ con los filtros aplicados
+        WITH base AS (
+            SELECT *
+            FROM lineas
+            WHERE {where_sql}
+        ),
+
+        -- CTE base total: para métricas sin filtro de central/depto
+        base_total AS (
+            SELECT *
+            FROM lineas
+            WHERE {where_total_sql}
+        ),
+
+        -- 1. Métricas del filtro activo
+        metricas AS (
+            SELECT
+                AVG(PRECIO_PROMEDIO)          AS precio_ref,
+                SUM(TONELADAS)                AS volumen_total_filtro,
+                COUNT(DISTINCT codigo_origen) AS municipios_activos,
+                COUNT(DISTINCT codigo_destino) AS centrales_activas
+            FROM base
+        ),
+
+        -- 2. Volumen total (sin filtro central/depto) y volumen RAPE
+        metricas_total AS (
+            SELECT SUM(TONELADAS) AS volumen_total_total FROM base_total
+        ),
+        metricas_rape AS (
+            SELECT SUM(TONELADAS) AS volumen_total_rape
+            FROM base_total
+            WHERE DEPARTAMENTO_ORIGEN_NORM IN ({placeholders_rape})
+        ),
+
+        -- 3. Ranking base por municipio origen
+        ranking AS (
+            SELECT
+                codigo_origen,
+                MUNICIPIO_ORIGEN,
+                DEPARTAMENTO_ORIGEN,
+                SUM(TONELADAS)                        AS toneladas_total,
+                AVG(PRECIO_PROMEDIO)                  AS precio_promedio,
+                MODE(PRECIO_PROMEDIO)                 AS precio_moda,
+                SUM(DIAS_CON_DATOS)                   AS dias_con_datos,
+                COUNT(DISTINCT periodo_mes)            AS meses_participacion,
+                SUM(PRECIO_PROMEDIO * TONELADAS)       AS recursos_movilizados_aprox
+            FROM base
+            GROUP BY 1, 2, 3
+        ),
+
+        -- 4. Serie mensual de precios y toneladas
+        serie AS (
+            SELECT
+                periodo_mes,
+                etiqueta_mes,
+                AVG(PRECIO_PROMEDIO) AS precio_promedio,
+                SUM(TONELADAS)       AS toneladas_total
+            FROM base
+            GROUP BY 1, 2
+            ORDER BY 1
+        ),
+
+        -- 5. Flujos para el mapa de arcos
+        flujos AS (
+            SELECT
+                codigo_origen,
+                MUNICIPIO_ORIGEN,
+                DEPARTAMENTO_ORIGEN,
+                CENTRAL_NOMBRE,
+                codigo_destino,
+                LONGITUD_ORIGEN,
+                LATITUD_ORIGEN,
+                LONGITUD_DESTINO,
+                LATITUD_DESTINO,
+                SUM(TONELADAS)       AS toneladas_total,
+                AVG(PRECIO_PROMEDIO) AS precio_promedio
+            FROM base
+            GROUP BY 1,2,3,4,5,6,7,8,9
+            HAVING LONGITUD_ORIGEN IS NOT NULL
+               AND LATITUD_ORIGEN  IS NOT NULL
+               AND LONGITUD_DESTINO IS NOT NULL
+               AND LATITUD_DESTINO  IS NOT NULL
+            ORDER BY toneladas_total DESC
+        ),
+
+        -- 6. Datos para el diagrama Sankey
+        sankey AS (
+            SELECT
+                MUNICIPIO_ORIGEN,
+                CENTRAL_NOMBRE,
+                SUM(TONELADAS) AS toneladas_total
+            FROM base
+            GROUP BY 1, 2
+            ORDER BY toneladas_total DESC
+        )
+
+        -- Retornamos todo junto con una columna que identifica cada tabla
+        SELECT 'metricas'      AS _tabla, TO_JSON(metricas)       AS _json FROM metricas
+        UNION ALL
+        SELECT 'total'         AS _tabla, TO_JSON(metricas_total)  AS _json FROM metricas_total
+        UNION ALL
+        SELECT 'rape'          AS _tabla, TO_JSON(metricas_rape)   AS _json FROM metricas_rape
+        UNION ALL
+        SELECT 'ranking'       AS _tabla, TO_JSON(ranking)         AS _json FROM ranking
+        UNION ALL
+        SELECT 'serie'         AS _tabla, TO_JSON(serie)           AS _json FROM serie
+        UNION ALL
+        SELECT 'flujos'        AS _tabla, TO_JSON(flujos)          AS _json FROM flujos
+        UNION ALL
+        SELECT 'sankey'        AS _tabla, TO_JSON(sankey)          AS _json FROM sankey
     """
 
-    return con.execute(query, params).df()
+    # Ejecutamos con todos los parámetros: filtro + total + rape
+    resultado = con.execute(query, params + params_total + deptos_rape).df()
 
+    # Separamos cada tabla del resultado
+    def extraer(nombre):
+        filas = resultado[resultado["_tabla"] == nombre]["_json"].tolist()
+        if not filas:
+            return pd.DataFrame()
+        registros = [json.loads(f) for f in filas]
+        return pd.DataFrame(registros)
 
-@st.cache_data(show_spinner=False)
-def consultar_moda_precios(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel, mtime_lineas, codigos_validos):
-    con = get_duckdb_connection(mtime_lineas, codigos_validos)
-    where_sql, params = construir_where_sql(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel)
+    metricas_df      = extraer("metricas")
+    total_df         = extraer("total")
+    rape_df          = extraer("rape")
+    ranking_df       = extraer("ranking")
+    serie_mensual_df = extraer("serie")
+    flujos_df        = extraer("flujos")
+    sankey_df        = extraer("sankey")
 
-    query = f"""
-        SELECT
-            codigo_origen,
-            MODE(PRECIO_PROMEDIO) AS precio_moda
-        FROM lineas
-        WHERE {where_sql}
-        GROUP BY 1
-    """
-
-    return con.execute(query, params).df()
-
-
-@st.cache_data(show_spinner=False)
-def consultar_serie_mensual(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel, mtime_lineas, codigos_validos):
-    con = get_duckdb_connection(mtime_lineas, codigos_validos)
-    where_sql, params = construir_where_sql(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel)
-
-    query = f"""
-        SELECT
-            periodo_mes,
-            etiqueta_mes,
-            AVG(PRECIO_PROMEDIO) AS precio_promedio,
-            SUM(TONELADAS) AS toneladas_total
-        FROM lineas
-        WHERE {where_sql}
-        GROUP BY 1, 2
-        ORDER BY 1
-    """
-
-    return con.execute(query, params).df()
-
-
-@st.cache_data(show_spinner=False)
-def consultar_flujos_mapa(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel, mtime_lineas, codigos_validos):
-    con = get_duckdb_connection(mtime_lineas, codigos_validos)
-    where_sql, params = construir_where_sql(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel)
-
-    query = f"""
-        SELECT
-            codigo_origen,
-            MUNICIPIO_ORIGEN,
-            DEPARTAMENTO_ORIGEN,
-            CENTRAL_NOMBRE,
-            codigo_destino,
-            LONGITUD_ORIGEN,
-            LATITUD_ORIGEN,
-            LONGITUD_DESTINO,
-            LATITUD_DESTINO,
-            SUM(TONELADAS) AS toneladas_total,
-            AVG(PRECIO_PROMEDIO) AS precio_promedio
-        FROM lineas
-        WHERE {where_sql}
-        GROUP BY 1,2,3,4,5,6,7,8,9
-        HAVING LONGITUD_ORIGEN IS NOT NULL
-           AND LATITUD_ORIGEN IS NOT NULL
-           AND LONGITUD_DESTINO IS NOT NULL
-           AND LATITUD_DESTINO IS NOT NULL
-        ORDER BY toneladas_total DESC
-    """
-
-    return con.execute(query, params).df()
-
-
-@st.cache_data(show_spinner=False)
-def consultar_sankey_base(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel, mtime_lineas, codigos_validos):
-    con = get_duckdb_connection(mtime_lineas, codigos_validos)
-    where_sql, params = construir_where_sql(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel, deptos_sel)
-
-    query = f"""
-        SELECT
-            MUNICIPIO_ORIGEN,
-            CENTRAL_NOMBRE,
-            SUM(TONELADAS) AS toneladas_total
-        FROM lineas
-        WHERE {where_sql}
-        GROUP BY 1, 2
-        ORDER BY toneladas_total DESC
-    """
-
-    return con.execute(query, params).df()
-
+    return metricas_df, total_df, rape_df, ranking_df, serie_mensual_df, flujos_df, sankey_df
 
 # =========================================================
 # CARGA INICIAL
@@ -740,23 +730,17 @@ mtime_municipios = obtener_mtime(RUTA_MUNICIPIOS)
 mtime_destino = obtener_mtime(RUTA_PUNTOS_DESTINO)
 mtime_origen = obtener_mtime(RUTA_PUNTOS_ORIGEN)
 
-municipios_raw, puntos_destino_raw, puntos_origen_raw = cargar_capas_estaticas(
+# Una sola llamada: carga + preparación, todo cacheado en memoria
+municipios, puntos_destino, puntos_origen, codigos_validos = cargar_y_preparar_capas_estaticas(
     mtime_municipios,
     mtime_destino,
     mtime_origen,
-)
-
-municipios, puntos_destino, puntos_origen, codigos_validos = preparar_capas_estaticas(
-    municipios_raw,
-    puntos_destino_raw,
-    puntos_origen_raw,
 )
 
 rubros, centrales, deptos, fecha_min_global, fecha_max_global = consultar_catalogos_lineas(
     mtime_lineas,
     codigos_validos
 )
-
 
 # =========================================================
 # ENCABEZADO
@@ -822,50 +806,25 @@ deptos_tuple = tuple(deptos_sel)
 
 
 # =========================================================
-# CONSULTAS PRINCIPALES
+# CONSULTAS PRINCIPALES — 1 solo escaneo del parquet
 # =========================================================
 
-metricas_filtradas_df = consultar_metricas_filtradas(
-    rubro_sel, fecha_ini, fecha_fin, semestre_sel, centrales_tuple, deptos_tuple, mtime_lineas, codigos_validos
+(
+    metricas_filtradas_df,
+    volumen_total_df,
+    volumen_rape_df,
+    ranking_base,
+    serie_mensual,
+    flujos_mapa,
+    sankey_base,
+) = consultar_todo_filtrado(
+    rubro_sel, fecha_ini, fecha_fin, semestre_sel,
+    centrales_tuple, deptos_tuple,
+    mtime_lineas, codigos_validos
 )
 
-volumen_total_df, volumen_rape_df = consultar_metricas_totales(
-    rubro_sel, fecha_ini, fecha_fin, semestre_sel, mtime_lineas, codigos_validos
-)
-
-ranking_base = consultar_ranking_base(
-    rubro_sel, fecha_ini, fecha_fin, semestre_sel, centrales_tuple, deptos_tuple, mtime_lineas, codigos_validos
-)
-
-moda_precios = consultar_moda_precios(
-    rubro_sel, fecha_ini, fecha_fin, semestre_sel, centrales_tuple, deptos_tuple, mtime_lineas, codigos_validos
-)
-
-serie_mensual = consultar_serie_mensual(
-    rubro_sel, fecha_ini, fecha_fin, semestre_sel, centrales_tuple, deptos_tuple, mtime_lineas, codigos_validos
-)
-
-flujos_mapa = consultar_flujos_mapa(
-    rubro_sel, fecha_ini, fecha_fin, semestre_sel, centrales_tuple, deptos_tuple, mtime_lineas, codigos_validos
-)
-
-sankey_base = consultar_sankey_base(
-    rubro_sel, fecha_ini, fecha_fin, semestre_sel, centrales_tuple, deptos_tuple, mtime_lineas, codigos_validos
-)
-
-precio_ref = float(metricas_filtradas_df.loc[0, "precio_ref"]) if not metricas_filtradas_df.empty and pd.notna(metricas_filtradas_df.loc[0, "precio_ref"]) else 0
-volumen_total_filtro = float(metricas_filtradas_df.loc[0, "volumen_total_filtro"]) if not metricas_filtradas_df.empty and pd.notna(metricas_filtradas_df.loc[0, "volumen_total_filtro"]) else 0
-municipios_activos = int(metricas_filtradas_df.loc[0, "municipios_activos"]) if not metricas_filtradas_df.empty and pd.notna(metricas_filtradas_df.loc[0, "municipios_activos"]) else 0
-centrales_activas = int(metricas_filtradas_df.loc[0, "centrales_activas"]) if not metricas_filtradas_df.empty and pd.notna(metricas_filtradas_df.loc[0, "centrales_activas"]) else 0
-
-volumen_total_total = float(volumen_total_df.loc[0, "volumen_total_total"]) if not volumen_total_df.empty and pd.notna(volumen_total_df.loc[0, "volumen_total_total"]) else 0
-volumen_total_rape = float(volumen_rape_df.loc[0, "volumen_total_rape"]) if not volumen_rape_df.empty and pd.notna(volumen_rape_df.loc[0, "volumen_total_rape"]) else 0
-
-if centrales_sel:
-    destino_label = ", ".join(centrales_sel)
-else:
-    destino_label = "todas las centrales mayoristas seleccionadas"
-
+# Nota: precio_moda ahora viene dentro de ranking_base (columna precio_moda)
+# ya no necesitas la variable moda_precios separada
 
 # =========================================================
 # FILTRO DE PUNTOS ORIGEN
@@ -919,7 +878,7 @@ else:
 # =========================================================
 
 if not ranking_base.empty:
-    ranking = ranking_base.merge(moda_precios, on="codigo_origen", how="left")
+    ranking = ranking_base.copy()
 
     total_meses = max(serie_mensual["periodo_mes"].nunique(), 1)
 
