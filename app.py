@@ -436,7 +436,14 @@ def consultar_todo_filtrado(rubro, fecha_ini, fecha_fin, semestre_sel, centrales
         ),
         ranking AS (
             SELECT
-                LPAD(REGEXP_REPLACE(CAST(codigo_origen AS VARCHAR), '\.0$', ''), 5, '0') AS codigo_origen,
+                CASE
+                    WHEN UPPER(TRIM(MUNICIPIO_ORIGEN)) = 'UNE'     THEN '25845'
+                    WHEN UPPER(TRIM(MUNICIPIO_ORIGEN)) = 'FÓMEQUE' THEN '25279'
+                    WHEN UPPER(TRIM(MUNICIPIO_ORIGEN)) = 'FOMÉQUE' THEN '25279'
+                    WHEN UPPER(TRIM(MUNICIPIO_ORIGEN)) = 'FOMEQUE' THEN '25279'
+                    WHEN UPPER(TRIM(MUNICIPIO_ORIGEN)) = 'CERRITO' THEN '68162'
+                    ELSE LPAD(REGEXP_REPLACE(CAST(codigo_origen AS VARCHAR), '\.0$', ''), 5, '0')
+                END AS codigo_origen,
                 MAX(MUNICIPIO_ORIGEN)            AS MUNICIPIO_ORIGEN,
                 MAX(DEPARTAMENTO_ORIGEN)         AS DEPARTAMENTO_ORIGEN,
                 SUM(TONELADAS)                   AS toneladas_total,
@@ -446,7 +453,7 @@ def consultar_todo_filtrado(rubro, fecha_ini, fecha_fin, semestre_sel, centrales
                 COUNT(DISTINCT periodo_mes)      AS meses_participacion,
                 SUM(PRECIO_PROMEDIO * TONELADAS) AS recursos_movilizados_aprox
             FROM base
-            GROUP BY LPAD(REGEXP_REPLACE(CAST(codigo_origen AS VARCHAR), '\.0$', ''), 5, '0')
+            GROUP BY 1
         ),
         serie AS (
             SELECT periodo_mes, etiqueta_mes,
