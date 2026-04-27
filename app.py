@@ -157,20 +157,43 @@ def construir_texto_contexto(df_ef, rubro, destino_label, fecha_ini, fecha_fin, 
             f"{rubro.lower()} en el periodo seleccionado."
         )
     top = df_ef.head(3).copy()
-    municipios       = ", ".join(top["MUNICIPIO_ORIGEN"].tolist())
-    ventaja_min      = top["ventaja_precio_pct"].min()
-    ventaja_max      = top["ventaja_precio_pct"].max()
-    participacion    = top["participacion_total_pct"].sum()
+    municipios    = ", ".join(top["MUNICIPIO_ORIGEN"].tolist())
+    ventaja_min   = top["ventaja_precio_pct"].min()
+    ventaja_max   = top["ventaja_precio_pct"].max()
+    participacion = top["participacion_total_pct"].sum()
+
     if semestre_sel != "Todos":
         periodo_desc = semestre_sel.lower()
     else:
         periodo_desc = f"el rango {fecha_ini.strftime('%Y-%m')} a {fecha_fin.strftime('%Y-%m')}"
+
+    todos_negativos = ventaja_max < 0
+    todos_positivos = ventaja_min > 0
+
+    if todos_positivos:
+        frase_precio = (
+            f"Sus precios se ubican entre {ventaja_min:.1f}% y {ventaja_max:.1f}% "
+            f"por debajo del promedio del mercado filtrado, lo que representa una ventaja competitiva en precio."
+        )
+    elif todos_negativos:
+        frase_precio = (
+            f"En términos de precio, estos municipios tienden a operar por encima del promedio del mercado "
+            f"filtrado (entre {abs(ventaja_max):.1f}% y {abs(ventaja_min):.1f}% más costosos), aunque su "
+            f"liderazgo en volumen y estabilidad de abastecimiento los posiciona favorablemente en el índice compuesto."
+        )
+    else:
+        frase_precio = (
+            f"Su comportamiento de precio es mixto respecto al promedio del mercado filtrado "
+            f"(entre {ventaja_min:.1f}% y {ventaja_max:.1f}%), con algunos municipios más competitivos "
+            f"en precio y otros que compensan con mayor volumen y estabilidad."
+        )
+
     return (
         f"Durante {periodo_desc}, el análisis para {rubro.lower()} hacia {destino_label} "
-        f"ubica a {municipios} entre los municipios más eficientes en la relación precio-volumen-estabilidad. "
-        f"En este subconjunto, las ventajas de precio observadas oscilan entre {ventaja_min:.1f}% y "
-        f"{ventaja_max:.1f}%, y su participación conjunta representa {participacion:.1f}% del volumen "
-        f"total registrado para este producto bajo los filtros temporales activos."
+        f"ubica a {municipios} entre los municipios con mayor peso relativo en la relación "
+        f"precio-volumen-estabilidad. {frase_precio} "
+        f"Su participación conjunta representa {participacion:.1f}% del volumen total registrado "
+        f"para este producto bajo los filtros temporales activos."
     )
 
 
@@ -901,31 +924,72 @@ def render_layout_principal(
 def render_tabla(ranking, max_filas_tabla):
     st.markdown('<div class="panel-title" style="margin-top:0.8rem;">Tabla consolidada de análisis</div>', unsafe_allow_html=True)
     if not ranking.empty:
-        tabla = ranking[[
+        # Columnas ordenables — se conservan como numéricas para el sort
+        tabla_num = ranking[[
             "ranking","MUNICIPIO_ORIGEN","DEPARTAMENTO_ORIGEN",
             "precio_promedio","precio_moda","toneladas_total","recursos_movilizados_aprox",
             "meses_participacion","participacion_filtro_pct","participacion_total_pct",
             "participacion_rape_pct","ventaja_precio_pct","indice_eficiencia"
         ]].copy()
-        tabla = tabla.rename(columns={
+        tabla_num = tabla_num.rename(columns={
             "MUNICIPIO_ORIGEN":    "municipio_origen",
             "DEPARTAMENTO_ORIGEN": "departamento_origen",
             "precio_promedio":     "precio_promedio_municipio",
         })
-        tabla["precio_promedio_municipio"]  = tabla["precio_promedio_municipio"].map(lambda x: f"$ {x:,.0f} COP")
-        tabla["precio_moda"]                = tabla["precio_moda"].map(lambda x: f"$ {x:,.0f} COP" if pd.notna(x) else "Sin dato")
-        tabla["toneladas_total"]            = tabla["toneladas_total"].map(lambda x: f"{x:,.1f}")
-        tabla["recursos_movilizados_aprox"] = tabla["recursos_movilizados_aprox"].map(lambda x: f"$ {x:,.0f} COP" if pd.notna(x) else "Sin dato")
-        tabla["participacion_filtro_pct"]   = tabla["participacion_filtro_pct"].map(lambda x: f"{x:.1f}%")
-        tabla["participacion_total_pct"]    = tabla["participacion_total_pct"].map(lambda x: f"{x:.1f}%")
-        tabla["participacion_rape_pct"]     = tabla["participacion_rape_pct"].map(lambda x: f"{x:.1f}%")
-        tabla["ventaja_precio_pct"]         = tabla["ventaja_precio_pct"].map(lambda x: f"{x:.1f}%")
-        tabla["indice_eficiencia"]          = tabla["indice_eficiencia"].map(lambda x: f"{x:.2f}")
-        tabla = tabla.rename(columns=NOMBRES_COLUMNAS_PRESENTABLES).head(max_filas_tabla)
-        st.dataframe(tabla, use_container_width=True, hide_index=True, height=420)
+        tabla_num = tabla_num.rename(columns=NOMBRES_COLUMNAS_PRESENTABLES)
+
+        # Selector de ordenamiento
+        cols_ordenables = [
+            "Ranking", "Precio promedio", "Toneladas acumuladas",
+            "Participación en filtro", "Participación total",
+            "Ventaja precio", "Índice de eficiencia", "Meses activos"
+        ]
+        col_sort, col_dir = st.columns([2, 1])
+        with col_sort:
+            col_orden = st.selectbox(
+                "Ordenar por", cols_ordenables,
+                index=0, key="tabla_orden_col",
+                label_visibility="collapsed"
+            )
+        with col_dir:
+            dir_orden = st.radio(
+                "Dirección", ["↓ Mayor a menor", "↑ Menor a mayor"],
+                index=0, horizontal=True, key="tabla_orden_dir",
+                label_visibility="collapsed"
+            )
+
+        ascendente = dir_orden == "↑ Menor a mayor"
+        tabla_num = tabla_num.sort_values(col_orden, ascending=ascendente).reset_index(drop=True)
+        # Actualizar ranking si el orden cambió
+        if col_orden != "Ranking":
+            tabla_num["Ranking"] = range(1, len(tabla_num) + 1)
+
+        # Formatear para presentación
+        tabla_fmt = tabla_num.copy()
+        tabla_fmt["Precio promedio"]            = tabla_fmt["Precio promedio"].map(lambda x: f"$ {x:,.0f} COP")
+        tabla_fmt["Precio moda"]                = tabla_fmt["Precio moda"].map(lambda x: f"$ {x:,.0f} COP" if pd.notna(x) else "Sin dato")
+        tabla_fmt["Toneladas acumuladas"]        = tabla_fmt["Toneladas acumuladas"].map(lambda x: f"{x:,.1f}")
+        tabla_fmt["Recursos movilizados aprox."] = tabla_fmt["Recursos movilizados aprox."].map(lambda x: f"$ {x:,.0f} COP" if pd.notna(x) else "Sin dato")
+        tabla_fmt["Participación en filtro"]     = tabla_fmt["Participación en filtro"].map(lambda x: f"{x:.1f}%")
+        tabla_fmt["Participación total"]         = tabla_fmt["Participación total"].map(lambda x: f"{x:.1f}%")
+        tabla_fmt["Participación RAPE"]          = tabla_fmt["Participación RAPE"].map(lambda x: f"{x:.1f}%")
+        tabla_fmt["Ventaja precio"]              = tabla_fmt["Ventaja precio"].map(lambda x: f"{x:.1f}%")
+        tabla_fmt["Índice de eficiencia"]        = tabla_fmt["Índice de eficiencia"].map(lambda x: f"{x:.2f}")
+
+        st.dataframe(tabla_fmt.head(max_filas_tabla), use_container_width=True, hide_index=True, height=420)
     else:
         st.info("No hay información disponible para la tabla consolidada.")
 
+    st.markdown("""
+    <div class="method-note">
+        <b>Cómo se interpreta la ventaja de precio:</b><br>
+        La ventaja de precio compara el precio promedio de cada municipio con el promedio general
+        del mercado bajo los filtros activos. Un valor <b>positivo</b> indica que el municipio
+        abastece a un precio <b>más bajo</b> que el promedio (ventaja competitiva).
+        Un valor <b>negativo</b> indica que sus precios son <b>más altos</b> que el promedio,
+        aunque puede compensar con mayor volumen o estabilidad de abastecimiento.
+    </div>
+    """, unsafe_allow_html=True)
     st.markdown("""
     <div class="method-note">
         <b>Cómo se calcula el índice de eficiencia:</b><br>
