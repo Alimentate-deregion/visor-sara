@@ -1024,14 +1024,13 @@ municipios_mapa["es_top30"] = municipios_mapa["codigo_origen"].astype(str).isin(
 
 
 
-n = len(municipios_mapa)
 municipios_mapa["fill_color"] = [
     [110, 68, 255, 150] if top30 else [40, 48, 62, 18]
-    for top30 in _es_top30
+    for top30 in municipios_mapa["es_top30"]
 ]
 municipios_mapa["line_color"] = [
     [170, 130, 255, 240] if top30 else [100, 110, 125, 60]
-    for top30 in _es_top30
+    for top30 in municipios_mapa["es_top30"]
 ]
 municipios_mapa["codigo_txt"] = municipios_mapa["codigo_origen"].fillna("")
 
