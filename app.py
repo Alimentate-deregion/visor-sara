@@ -8,7 +8,6 @@ import pandas as pd
 import plotly.graph_objects as go
 import pydeck as pdk
 import streamlit as st
-from PIL import Image
 
 # =========================================================
 # CONFIGURACIÓN GENERAL
@@ -489,12 +488,34 @@ rubros, centrales, deptos, fecha_min_global, fecha_max_global = \
 # ENCABEZADO
 # =========================================================
 
-_col_logo, _col_titulo = st.columns([0.07, 0.93])
-with _col_logo:
-    st.image(Image.open(RUTA_LOGO), width=90)
-with _col_titulo:
-    st.markdown('<div class="top-title">Visor de precios y abastecimiento agroalimentario</div>', unsafe_allow_html=True)
-    st.markdown('<div class="top-subtitle">Lectura territorial de precios, flujos y eficiencia relativa de municipios de origen por producto y central mayorista.</div>', unsafe_allow_html=True)
+import base64
+with open(RUTA_LOGO, "rb") as _f:
+    _logo_b64 = base64.b64encode(_f.read()).decode()
+
+st.markdown(f"""
+<div style="
+    background: #FFFFFF;
+    border-bottom: 2px solid #2B3240;
+    padding: 10px 20px;
+    margin-bottom: 0.85rem;
+    margin-left: -1.1rem;
+    margin-right: -1.1rem;
+    margin-top: -0.8rem;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+">
+    <img src="data:image/jpeg;base64,{_logo_b64}" style="height:64px; width:auto; flex-shrink:0;" />
+    <div>
+        <div style="font-size:1.85rem; font-weight:700; color:#111827; letter-spacing:-0.01em; line-height:1.1;">
+            Visor de precios y abastecimiento agroalimentario
+        </div>
+        <div style="font-size:0.92rem; color:#6B7280; margin-top:4px;">
+            Lectura territorial de precios, flujos y eficiencia relativa de municipios de origen por producto y central mayorista.
+        </div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
 
 # =========================================================
@@ -502,7 +523,7 @@ with _col_titulo:
 # =========================================================
 
 st.markdown('<div class="filter-wrap">', unsafe_allow_html=True)
-f1, f2, f3, f4, f5, f6, f7 = st.columns([1.2, 1.5, 1.1, 1.0, 1.2, 0.9, 0.9])
+f1, f2, f3, f4, f5 = st.columns([1.2, 1.5, 1.1, 1.0, 1.4])
 
 with f1:
     rubro_sel = st.selectbox("Rubro", rubros, index=0 if rubros else None)
@@ -515,12 +536,11 @@ with f4:
 with f5:
     rango = st.date_input("Periodo", value=(fecha_min_global, fecha_max_global),
                           min_value=fecha_min_global, max_value=fecha_max_global)
-with f6:
-    max_lineas = st.slider("Máx. flujos", 100, MAX_LINEAS_MAPA_MAX, MAX_LINEAS_MAPA_DEFAULT, 100)
-with f7:
-    max_filas_tabla = st.slider("Filas tabla", 50, 1000, MAX_FILAS_TABLA_DEFAULT, 50)
 
 st.markdown("</div>", unsafe_allow_html=True)
+
+max_lineas      = MAX_LINEAS_MAPA_DEFAULT
+max_filas_tabla = MAX_FILAS_TABLA_DEFAULT
 
 if isinstance(rango, tuple) and len(rango) == 2:
     fecha_ini, fecha_fin = rango
