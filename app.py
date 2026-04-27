@@ -436,14 +436,16 @@ def consultar_todo_filtrado(rubro, fecha_ini, fecha_fin, semestre_sel, centrales
         ),
         ranking AS (
             SELECT
-                codigo_origen, MUNICIPIO_ORIGEN, DEPARTAMENTO_ORIGEN,
-                SUM(TONELADAS)                  AS toneladas_total,
-                AVG(PRECIO_PROMEDIO)            AS precio_promedio,
-                MODE(PRECIO_PROMEDIO)           AS precio_moda,
-                SUM(DIAS_CON_DATOS)             AS dias_con_datos,
-                COUNT(DISTINCT periodo_mes)     AS meses_participacion,
+                codigo_origen,
+                MAX(MUNICIPIO_ORIGEN)            AS MUNICIPIO_ORIGEN,
+                MAX(DEPARTAMENTO_ORIGEN)         AS DEPARTAMENTO_ORIGEN,
+                SUM(TONELADAS)                   AS toneladas_total,
+                AVG(PRECIO_PROMEDIO)             AS precio_promedio,
+                MODE(PRECIO_PROMEDIO)            AS precio_moda,
+                SUM(DIAS_CON_DATOS)              AS dias_con_datos,
+                COUNT(DISTINCT periodo_mes)      AS meses_participacion,
                 SUM(PRECIO_PROMEDIO * TONELADAS) AS recursos_movilizados_aprox
-            FROM base GROUP BY 1,2,3
+            FROM base GROUP BY 1
         ),
         serie AS (
             SELECT periodo_mes, etiqueta_mes,
