@@ -748,7 +748,7 @@ rubros, centrales, deptos, fecha_min_global, fecha_max_global = consultar_catalo
 
 _logo_col, _titulo_col = st.columns([0.08, 0.92])
 with _logo_col:
-    st.image("datos/MDS-245-ES.jpg", width=90)
+    st.image(str(BASE_DIR / "MDS-245-ES.jpg"), width=90)
 with _titulo_col:
     st.markdown('<div class="top-title">Visor de precios y abastecimiento agroalimentario</div>', unsafe_allow_html=True)
     st.markdown(
