@@ -1,11 +1,8 @@
 streamlit
+duckdb
+geopandas
 pandas
 numpy
-geopandas
 plotly
-pydeck
+pydeck==0.8.0
 pyarrow
-pyogrio
-shapely
-pyproj
-duckdb

@@ -867,7 +867,7 @@ def render_layout_principal(
                 "html": "<b>{tipo_elemento}</b><br/>{detalle_1}<br/>{detalle_2}<br/>{detalle_3}<br/>{detalle_4}",
                 "style": {"backgroundColor":"rgba(18,22,29,0.95)","color":"#F5F7FA","fontSize":"12px"}
             },
-            map_style="mapbox://styles/mapbox/dark-v10"
+            map_style="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
         )
         st.pydeck_chart(deck, use_container_width=True)
 
