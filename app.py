@@ -746,11 +746,15 @@ rubros, centrales, deptos, fecha_min_global, fecha_max_global = consultar_catalo
 # ENCABEZADO
 # =========================================================
 
-st.markdown('<div class="top-title">Visor de precios y abastecimiento agroalimentario</div>', unsafe_allow_html=True)
-st.markdown(
-    '<div class="top-subtitle">Lectura territorial de precios, flujos y eficiencia relativa de municipios de origen por producto y central mayorista.</div>',
-    unsafe_allow_html=True
-)
+_logo_col, _titulo_col = st.columns([0.08, 0.92])
+with _logo_col:
+    st.image("datos/MDS-245-ES.jpg", width=90)
+with _titulo_col:
+    st.markdown('<div class="top-title">Visor de precios y abastecimiento agroalimentario</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="top-subtitle">Lectura territorial de precios, flujos y eficiencia relativa de municipios de origen por producto y central mayorista.</div>',
+        unsafe_allow_html=True
+    )
 
 
 # =========================================================
@@ -1018,28 +1022,21 @@ municipios_mapa["categoria_eficiencia"] = municipios_mapa["categoria_eficiencia"
 municipios_mapa["es_top30"] = municipios_mapa["codigo_origen"].astype(str).isin(top30_codigos)
 
 
-def fill_color(row):
-    if row["es_top30"]:
-        return [110, 68, 255, 150]
-    if row["categoria_eficiencia"] == "Alta eficiencia":
-        return [235, 87, 87, 145]
-    if row["categoria_eficiencia"] == "Eficiencia media":
-        return [65, 145, 255, 120]
-    return [40, 48, 62, 18]
 
+_es_top30  = municipios_mapa["es_top30"].values
+_categoria = municipios_mapa["categoria_eficiencia"].values
 
-def line_color(row):
-    if row["es_top30"]:
-        return [170, 130, 255, 240]
-    if row["categoria_eficiencia"] == "Alta eficiencia":
-        return [255, 120, 120, 220]
-    if row["categoria_eficiencia"] == "Eficiencia media":
-        return [95, 170, 255, 220]
-    return [100, 110, 125, 60]
+_fill = np.where(_es_top30,  [[110, 68, 255, 150]],
+        np.where(_categoria == "Alta eficiencia",  [[235, 87, 87, 145]],
+        np.where(_categoria == "Eficiencia media", [[65, 145, 255, 120]],
+                                                   [[40, 48, 62, 18]])))
+_line = np.where(_es_top30,  [[170, 130, 255, 240]],
+        np.where(_categoria == "Alta eficiencia",  [[255, 120, 120, 220]],
+        np.where(_categoria == "Eficiencia media", [[95, 170, 255, 220]],
+                                                   [[100, 110, 125, 60]])))
 
-
-municipios_mapa["fill_color"] = municipios_mapa.apply(fill_color, axis=1)
-municipios_mapa["line_color"] = municipios_mapa.apply(line_color, axis=1)
+municipios_mapa["fill_color"] = [list(c) for c in _fill]
+municipios_mapa["line_color"] = [list(c) for c in _line]
 municipios_mapa["codigo_txt"] = municipios_mapa["codigo_origen"].fillna("")
 
 
