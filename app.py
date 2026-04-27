@@ -1025,22 +1025,14 @@ municipios_mapa["es_top30"] = municipios_mapa["codigo_origen"].astype(str).isin(
 
 
 n = len(municipios_mapa)
-_fill = [[40, 48, 62, 18]] * n
-_line = [[100, 110, 125, 60]] * n
-
-for i, (top30, cat) in enumerate(zip(_es_top30, _categoria)):
-    if top30:
-        _fill[i] = [110, 68, 255, 150]
-        _line[i] = [170, 130, 255, 240]
-    elif cat == "Alta eficiencia":
-        _fill[i] = [235, 87, 87, 145]
-        _line[i] = [255, 120, 120, 220]
-    elif cat == "Eficiencia media":
-        _fill[i] = [65, 145, 255, 120]
-        _line[i] = [95, 170, 255, 220]
-
-municipios_mapa["fill_color"] = _fill
-municipios_mapa["line_color"] = _line
+municipios_mapa["fill_color"] = [
+    [110, 68, 255, 150] if top30 else [40, 48, 62, 18]
+    for top30 in _es_top30
+]
+municipios_mapa["line_color"] = [
+    [170, 130, 255, 240] if top30 else [100, 110, 125, 60]
+    for top30 in _es_top30
+]
 municipios_mapa["codigo_txt"] = municipios_mapa["codigo_origen"].fillna("")
 
 
