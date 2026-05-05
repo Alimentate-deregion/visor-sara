@@ -22,8 +22,6 @@ st.set_page_config(
 BASE_DIR            = Path("datos")
 RUTA_LINEAS         = BASE_DIR / "lineas_abastecimiento.parquet"
 RUTA_MUNICIPIOS     = BASE_DIR / "municipios_ligeros.parquet"
-RUTA_PUNTOS_DESTINO = BASE_DIR / "puntos_destino.geojson"
-RUTA_PUNTOS_ORIGEN  = BASE_DIR / "puntos_origen.geojson"
 RUTA_LOGO           = BASE_DIR / "MDS-245-ES.jpg"
 RUTA_LINEAS_SQL     = RUTA_LINEAS.as_posix()
 
@@ -35,6 +33,17 @@ DEPTOS_RAPE = {
 MAX_FILAS_TABLA_DEFAULT = 300
 MAX_LINEAS_MAPA_DEFAULT = 600
 MAX_LINEAS_MAPA_MAX     = 1500
+
+# Keep-alive — evita que Streamlit Cloud duerma el app
+st.markdown("""
+<script>
+(function keepAlive() {
+    setInterval(function() {
+        fetch(window.location.href, {method:'GET', cache:'no-store'}).catch(function(){});
+    }, 45 * 60 * 1000);
+})();
+</script>
+""", unsafe_allow_html=True)
 
 # =========================================================
 # ESTILO
@@ -254,17 +263,15 @@ def construir_where_sql(rubro, fecha_ini, fecha_fin, semestre_sel, centrales_sel
 # Incluye pre-serialización del GeoJSON base (sin colores)
 # =========================================================
 
+# =========================================================
+# CARGA DE MUNICIPIOS
+# =========================================================
+
 @st.cache_resource(show_spinner=False)
-def cargar_y_preparar_capas_estaticas(mtime_municipios, mtime_destino, mtime_origen):
-    municipios     = gpd.read_parquet(RUTA_MUNICIPIOS)
-    puntos_destino = gpd.read_file(RUTA_PUNTOS_DESTINO)
-    puntos_origen  = gpd.read_file(RUTA_PUNTOS_ORIGEN)
+def cargar_y_preparar_capas_estaticas(mtime_municipios):
+    municipios = gpd.read_parquet(RUTA_MUNICIPIOS)
+    municipios = municipios.copy()
 
-    municipios     = municipios.copy()
-    puntos_destino = puntos_destino.copy()
-    puntos_origen  = puntos_origen.copy()
-
-    # Código municipio
     for col in ["MpCodigo", "CODIGO_MUNICIPIO"]:
         if col in municipios.columns:
             municipios["codigo_origen"] = municipios[col].apply(normalizar_codigo_5)
@@ -272,71 +279,24 @@ def cargar_y_preparar_capas_estaticas(mtime_municipios, mtime_destino, mtime_ori
     else:
         raise ValueError("La capa de municipios no tiene MpCodigo ni CODIGO_MUNICIPIO.")
 
-    # Nombre municipio
-    for col in ["Nombre","MpNombre","MUNICIPIO","NOMBRE_MUNICIPIO","NOMBRE_MPIO","NOM_MUN","municipio","nombre"]:
+    for col in ["Nombre","MpNombre","MUNICIPIO","NOMBRE_MUNICIPIO","nombre_municipio"]:
         if col in municipios.columns:
             municipios["nombre_municipio"] = municipios[col].apply(normalizar_texto)
             break
     else:
         municipios["nombre_municipio"] = ""
 
-    # Departamento
-    for col in ["Depto","DEPARTAMENTO","NOMBRE_DPT","NOM_DEP"]:
+    for col in ["Depto","DEPARTAMENTO","departamento"]:
         if col in municipios.columns:
             municipios["departamento"] = municipios[col].apply(normalizar_texto)
             break
     else:
         municipios["departamento"] = ""
 
-    # Puntos destino
-    puntos_destino["codigo_destino"] = puntos_destino["CODIGO_MUNICIPIO"].apply(normalizar_codigo_5)
-    puntos_destino["NOMBRE_CENTRAL"] = puntos_destino["NOMBRE_CENTRAL"].apply(normalizar_texto)
-    puntos_destino["CIUDAD"]         = puntos_destino["CIUDAD"].apply(normalizar_texto)
-
-    # Puntos origen
-    puntos_origen["FECHA"] = pd.to_datetime(puntos_origen["FECHA"], errors="coerce")
-    for col in ["RUBRO","DEPARTAMENTO_ORIGEN","MUNICIPIO_ORIGEN","CENTRAL_NOMBRE"]:
-        if col in puntos_origen.columns:
-            puntos_origen[col] = puntos_origen[col].apply(normalizar_texto)
-    for col in ["TONELADAS","PRECIO_PROMEDIO","PRECIO_MEDIANA","DIAS_CON_DATOS","MES"]:
-        if col in puntos_origen.columns:
-            puntos_origen[col] = pd.to_numeric(puntos_origen[col], errors="coerce")
-    puntos_origen["codigo_origen"]  = puntos_origen["CODIGO_DIVIPOLA_MUN_ORIGEN_LIMPIO"].apply(normalizar_codigo_5)
-    puntos_origen["codigo_destino"] = puntos_origen["CODIGO_DIVIPOLA_MUN_DESTINO_LIMPIO"].apply(normalizar_codigo_5)
-
-    depto_norm_map = {
-        "BOGOTA":"BOGOTÁ","BOGOTA D.C.":"BOGOTÁ, D.C.","BOGOTA, D.C.":"BOGOTÁ, D.C.",
-        "BOGOTÁ D.C.":"BOGOTÁ, D.C.","BOGOTA DC":"BOGOTÁ, D.C.","BOGOTÁ DC":"BOGOTÁ, D.C.",
-        "BOYACA":"BOYACÁ"
-    }
-    puntos_origen["DEPARTAMENTO_ORIGEN_NORM"] = (
-        puntos_origen["DEPARTAMENTO_ORIGEN"].astype(str).str.strip().str.upper().replace(depto_norm_map)
-    )
-    puntos_origen["periodo_mes"]  = puntos_origen["FECHA"].dt.to_period("M").dt.to_timestamp()
-    puntos_origen["etiqueta_mes"] = puntos_origen["FECHA"].dt.strftime("%Y-%m")
-    puntos_origen["semestre"]     = np.where(
-        puntos_origen["MES"].isin([1,2,3,4,5,6]), "Primer semestre", "Segundo semestre"
-    )
-
-    codigos_validos = tuple(sorted(municipios["codigo_origen"].dropna().astype(str).unique().tolist()))
-    puntos_origen   = puntos_origen[puntos_origen["codigo_origen"].isin(codigos_validos)].copy()
-
-    # ---- Pre-serializar GeoJSON base con color gris fijo ----
-    # Esto se hace UNA SOLA VEZ al arrancar y nunca se recalcula.
-    # Los colores dinámicos (top30 morado) se calculan ligeramente encima en render.
-    mun_base = municipios.copy()
-    mun_base["fill_color"]    = [[40, 48, 62, 18]] * len(mun_base)
-    mun_base["line_color"]    = [[100, 110, 125, 60]] * len(mun_base)
-    mun_base["tipo_elemento"] = "Municipio"
-    mun_base["detalle_1"]     = "Nombre: " + mun_base["nombre_municipio"].fillna("Sin nombre disponible").astype(str)
-    mun_base["detalle_2"]     = "Departamento: " + mun_base["departamento"].fillna("Sin dato").astype(str)
-    mun_base["detalle_3"]     = "Código: " + mun_base["codigo_origen"].fillna("Sin código").astype(str)
-    mun_base["detalle_4"]     = ""
-    geojson_base = json.loads(
-        mun_base[["fill_color","line_color","tipo_elemento","detalle_1","detalle_2","detalle_3","detalle_4","geometry"]].to_json()
-    )
-
-    return municipios, puntos_destino, puntos_origen, codigos_validos, geojson_base
+    codigos_validos = tuple(sorted(
+        municipios["codigo_origen"].dropna().astype(str).unique().tolist()
+    ))
+    return municipios, codigos_validos
 
 
 # =========================================================
@@ -507,11 +467,8 @@ def consultar_todo_filtrado(rubro, fecha_ini, fecha_fin, semestre_sel, centrales
 
 mtime_lineas     = obtener_mtime(RUTA_LINEAS)
 mtime_municipios = obtener_mtime(RUTA_MUNICIPIOS)
-mtime_destino    = obtener_mtime(RUTA_PUNTOS_DESTINO)
-mtime_origen     = obtener_mtime(RUTA_PUNTOS_ORIGEN)
 
-municipios, puntos_destino, puntos_origen, codigos_validos, geojson_base = \
-    cargar_y_preparar_capas_estaticas(mtime_municipios, mtime_destino, mtime_origen)
+municipios, codigos_validos = cargar_y_preparar_capas_estaticas(mtime_municipios)
 
 rubros, centrales, deptos, fecha_min_global, fecha_max_global = \
     consultar_catalogos_lineas(mtime_lineas, codigos_validos)
@@ -689,6 +646,10 @@ else:
 # Vectorizado: sin .apply(), O(n) sobre lista Python
 # =========================================================
 
+# =========================================================
+# PREPARACIÓN DEL MAPA — top30 morado, puntos desde flujos
+# =========================================================
+
 top30_list = municipios["codigo_origen"].astype(str).isin(top30_codigos).tolist()
 municipios_web = municipios[["nombre_municipio","departamento","codigo_origen","geometry"]].copy()
 municipios_web["fill_color"] = [
@@ -698,45 +659,16 @@ municipios_web["line_color"] = [
     [170, 130, 255, 240] if es_top else [100, 110, 125, 60] for es_top in top30_list
 ]
 municipios_web["tipo_elemento"] = "Municipio"
-municipios_web["detalle_1"]     = "Nombre: "       + municipios_web["nombre_municipio"].fillna("Sin nombre disponible").astype(str)
+municipios_web["detalle_1"]     = "Nombre: "       + municipios_web["nombre_municipio"].fillna("Sin nombre").astype(str)
 municipios_web["detalle_2"]     = "Departamento: " + municipios_web["departamento"].fillna("Sin dato").astype(str)
-municipios_web["detalle_3"]     = "Código: "       + municipios_web["codigo_origen"].fillna("Sin código").astype(str)
+municipios_web["detalle_3"]     = "Código: "       + municipios_web["codigo_origen"].fillna("").astype(str)
 municipios_web["detalle_4"]     = ""
 
 geojson_municipios = json.loads(
     municipios_web[["fill_color","line_color","tipo_elemento","detalle_1","detalle_2","detalle_3","detalle_4","geometry"]].to_json()
 )
 
-# Puntos destino filtrados
-puntos_destino_f = puntos_destino[puntos_destino["NOMBRE_CENTRAL"].isin(centrales_sel)].copy() \
-                   if centrales_sel else puntos_destino.copy()
-
-# Puntos origen agregados desde GeoJSON
-puntos_origen_f = puntos_origen[
-    (puntos_origen["FECHA"].dt.date >= fecha_ini) &
-    (puntos_origen["FECHA"].dt.date <= fecha_fin) &
-    (puntos_origen["RUBRO"] == rubro_sel)
-].copy()
-if semestre_sel != "Todos":
-    puntos_origen_f = puntos_origen_f[puntos_origen_f["semestre"] == semestre_sel]
-if centrales_sel:
-    puntos_origen_f = puntos_origen_f[puntos_origen_f["CENTRAL_NOMBRE"].isin(centrales_sel)]
-if deptos_sel:
-    puntos_origen_f = puntos_origen_f[puntos_origen_f["DEPARTAMENTO_ORIGEN"].isin(deptos_sel)]
-
-if not puntos_origen_f.empty:
-    puntos_origen_agg = (
-        puntos_origen_f.groupby(["codigo_origen","MUNICIPIO_ORIGEN","DEPARTAMENTO_ORIGEN"], as_index=False)
-        .agg(TONELADAS=("TONELADAS","sum"), PRECIO_PROMEDIO=("PRECIO_PROMEDIO","mean"), geometry=("geometry","first"))
-    )
-    puntos_origen_agg = gpd.GeoDataFrame(puntos_origen_agg, geometry="geometry", crs=puntos_origen_f.crs)
-else:
-    puntos_origen_agg = gpd.GeoDataFrame(
-        columns=["codigo_origen","MUNICIPIO_ORIGEN","DEPARTAMENTO_ORIGEN","TONELADAS","PRECIO_PROMEDIO","geometry"],
-        geometry="geometry", crs=puntos_origen.crs
-    )
-
-# Tooltip campos para flujos y puntos
+# Tooltip de flujos
 if not flujos_mapa.empty:
     flujos_mapa["tipo_elemento"] = "Flujo OD"
     flujos_mapa["detalle_1"]     = "Origen: "            + flujos_mapa["MUNICIPIO_ORIGEN"].fillna("")
@@ -744,39 +676,38 @@ if not flujos_mapa.empty:
     flujos_mapa["detalle_3"]     = "Precio promedio: "   + flujos_mapa["precio_fmt"].fillna("")
     flujos_mapa["detalle_4"]     = "Toneladas: "         + flujos_mapa["toneladas_fmt"].fillna("")
 
-if not puntos_origen_agg.empty:
-    puntos_origen_agg["lon"]          = puntos_origen_agg["geometry"].apply(lambda g: g.x if g is not None else np.nan)
-    puntos_origen_agg["lat"]          = puntos_origen_agg["geometry"].apply(lambda g: g.y if g is not None else np.nan)
-    puntos_origen_agg["toneladas_fmt"] = puntos_origen_agg["TONELADAS"].map(formatear_ton)
-    puntos_origen_agg["precio_fmt"]    = puntos_origen_agg["PRECIO_PROMEDIO"].map(formatear_cop)
-    puntos_origen_agg["tipo_elemento"] = "Nodo de origen"
-    puntos_origen_agg["detalle_1"]     = "Origen: "          + puntos_origen_agg["MUNICIPIO_ORIGEN"].fillna("")
-    puntos_origen_agg["detalle_2"]     = "Departamento: "    + puntos_origen_agg["DEPARTAMENTO_ORIGEN"].fillna("")
-    puntos_origen_agg["detalle_3"]     = "Precio promedio: " + puntos_origen_agg["precio_fmt"].fillna("")
-    puntos_origen_agg["detalle_4"]     = "Toneladas: "       + puntos_origen_agg["toneladas_fmt"].fillna("")
+# Puntos de origen desde flujos (naranja)
+if not flujos_mapa.empty:
+    orig_pts = flujos_mapa.groupby(
+        ["MUNICIPIO_ORIGEN","DEPARTAMENTO_ORIGEN"], as_index=False
+    ).agg(
+        lon=("LONGITUD_ORIGEN","first"),
+        lat=("LATITUD_ORIGEN","first"),
+        TONELADAS=("toneladas_total","sum"),
+        PRECIO_PROMEDIO=("precio_promedio","mean")
+    ).dropna(subset=["lon","lat"])
+    orig_pts["tipo_elemento"]  = "Municipio de origen"
+    orig_pts["detalle_1"]      = "Municipio: "       + orig_pts["MUNICIPIO_ORIGEN"].fillna("")
+    orig_pts["detalle_2"]      = "Departamento: "    + orig_pts["DEPARTAMENTO_ORIGEN"].fillna("")
+    orig_pts["detalle_3"]      = "Toneladas: "       + orig_pts["TONELADAS"].map(formatear_ton)
+    orig_pts["detalle_4"]      = "Precio promedio: " + orig_pts["PRECIO_PROMEDIO"].map(formatear_cop)
+else:
+    orig_pts = pd.DataFrame(columns=["MUNICIPIO_ORIGEN","lon","lat","tipo_elemento",
+                                      "detalle_1","detalle_2","detalle_3","detalle_4"])
 
-if not puntos_destino_f.empty:
-    puntos_destino_f["tipo_elemento"] = "Central mayorista"
-    puntos_destino_f["detalle_1"]     = "Nombre: "           + puntos_destino_f["NOMBRE_CENTRAL"].fillna("")
-    puntos_destino_f["detalle_2"]     = "Ciudad: "            + puntos_destino_f["CIUDAD"].fillna("")
-    puntos_destino_f["detalle_3"]     = "Código municipio: " + puntos_destino_f["codigo_destino"].fillna("")
-    puntos_destino_f["detalle_4"]     = ""
-
-NOMBRES_COLUMNAS_PRESENTABLES = {
-    "ranking": "Ranking",
-    "municipio_origen": "Municipio origen",
-    "departamento_origen": "Departamento origen",
-    "precio_promedio_municipio": "Precio promedio",
-    "precio_moda": "Precio moda",
-    "toneladas_total": "Toneladas acumuladas",
-    "meses_participacion": "Meses activos",
-    "participacion_filtro_pct": "Participación en filtro",
-    "participacion_total_pct": "Participación total",
-    "participacion_rape_pct": "Participación RAPE",
-    "ventaja_precio_pct": "Ventaja precio",
-    "indice_eficiencia": "Índice de eficiencia",
-    "recursos_movilizados_aprox": "Recursos movilizados aprox."
-}
+# Centrales desde flujos (cyan)
+if not flujos_mapa.empty:
+    cent_pts = flujos_mapa.groupby("CENTRAL_NOMBRE", as_index=False).agg(
+        lon=("LONGITUD_DESTINO","first"), lat=("LATITUD_DESTINO","first")
+    ).dropna(subset=["lon","lat"])
+    cent_pts["tipo_elemento"] = "Central mayorista"
+    cent_pts["detalle_1"]     = "Central: " + cent_pts["CENTRAL_NOMBRE"].fillna("")
+    cent_pts["detalle_2"]     = ""
+    cent_pts["detalle_3"]     = ""
+    cent_pts["detalle_4"]     = ""
+else:
+    cent_pts = pd.DataFrame(columns=["CENTRAL_NOMBRE","lon","lat","tipo_elemento",
+                                      "detalle_1","detalle_2","detalle_3","detalle_4"])
 
 
 # =========================================================
@@ -786,9 +717,8 @@ NOMBRES_COLUMNAS_PRESENTABLES = {
 @st.fragment
 def render_layout_principal(
     volumen_total_filtro, precio_ref, municipios_activos, centrales_activas,
-    geojson_municipios, flujos_mapa, puntos_origen_agg, puntos_destino_f, serie_mensual,
-    sankey_top, municipios_eficientes, rubro_sel, destino_label,
-    fecha_ini, fecha_fin, semestre_sel
+    geojson_municipios, flujos_mapa, orig_pts, cent_pts, serie_mensual,
+    sankey_top, rubro_sel, destino_label, fecha_ini, fecha_fin, semestre_sel
 ):
     left_col, center_col, right_col = st.columns([1.05, 3.8, 1.45], gap="small")
 
@@ -796,40 +726,41 @@ def render_layout_principal(
     with left_col:
         st.markdown('<div class="panel">', unsafe_allow_html=True)
         st.markdown('<div class="panel-title">Indicadores principales</div>', unsafe_allow_html=True)
-        st.markdown(
-            f"""
-            <div class="metric-card">
-                <div class="metric-label">Toneladas abastecidas</div>
-                <div class="metric-value">{volumen_total_filtro:,.0f}</div>
-                <div class="metric-small">Periodo filtrado</div>
-            </div>
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-label">Toneladas abastecidas</div>
+            <div class="metric-value">{volumen_total_filtro:,.0f}</div>
+            <div class="metric-small">Periodo filtrado</div>
+        </div>
+        """, unsafe_allow_html=True)
+        if precio_ref and precio_ref > 0:
+            st.markdown(f"""
             <div class="metric-card">
                 <div class="metric-label">Precio promedio</div>
                 <div class="metric-value" style="font-size:1.65rem;">$ {precio_ref:,.0f}</div>
-                <div class="metric-small">Mercado filtrado</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-label">Municipios origen activos</div>
-                <div class="metric-value">{municipios_activos}</div>
-                <div class="metric-small">Con flujo válido</div>
-            </div>
-            <div class="metric-card">
-                <div class="metric-label">Centrales activas</div>
-                <div class="metric-value">{centrales_activas}</div>
-                <div class="metric-small">Bajo filtros actuales</div>
-            </div>
-            """, unsafe_allow_html=True
-        )
+                <div class="metric-small">Mercado filtrado ($/kg)</div>
+            </div>""", unsafe_allow_html=True)
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-label">Municipios origen activos</div>
+            <div class="metric-value">{municipios_activos}</div>
+            <div class="metric-small">Con flujo válido</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-label">Centrales activas</div>
+            <div class="metric-value">{centrales_activas}</div>
+            <div class="metric-small">Bajo filtros actuales</div>
+        </div>
+        """, unsafe_allow_html=True)
         st.markdown('<div class="panel-title">Leyenda</div>', unsafe_allow_html=True)
         st.markdown("""
         <div class="legend-item"><span class="legend-box" style="background:#6E44FF;"></span>Top 30 abastecedores</div>
+        <div class="legend-item"><span class="legend-box" style="background:#F5A020;border-radius:50%;"></span>Municipio de origen activo</div>
         <div class="legend-item"><span class="legend-box" style="background:#F5B041;"></span>Arcos de flujo OD</div>
         <div class="legend-item"><span class="legend-box" style="background:#00D2FF;"></span>Central mayorista</div>
-        """, unsafe_allow_html=True)
-        st.markdown("""
-        <div class="small-note">
-            Los municipios morados corresponden a los 30 principales abastecedores del filtro actual.
-            Los arcos muestran los flujos origen-destino hacia las centrales mayoristas bajo los filtros activos.
+        <div class="small-note" style="margin-top:0.5rem;">
+            Los municipios morados son los 30 principales abastecedores.
+            Los arcos muestran flujos origen–destino bajo los filtros activos.
         </div>
         """, unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
@@ -838,14 +769,13 @@ def render_layout_principal(
     with center_col:
         st.markdown('<div class="panel-title">Mapa de flujos de abastecimiento</div>', unsafe_allow_html=True)
 
-        layers = []
-        layers.append(pdk.Layer(
+        layers = [pdk.Layer(
             "GeoJsonLayer", data=geojson_municipios,
             stroked=True, filled=True, extruded=False, wireframe=False,
             get_fill_color="properties.fill_color",
             get_line_color="properties.line_color",
             line_width_min_pixels=1.0, pickable=True, auto_highlight=True
-        ))
+        )]
         if not flujos_mapa.empty:
             layers.append(pdk.Layer(
                 "ArcLayer", data=flujos_mapa,
@@ -855,17 +785,17 @@ def render_layout_principal(
                 get_width="ancho_linea", width_scale=1, width_min_pixels=1,
                 pickable=True, auto_highlight=True
             ))
-        if not puntos_origen_agg.empty:
+        if not orig_pts.empty:
             layers.append(pdk.Layer(
-                "ScatterplotLayer", data=puntos_origen_agg,
+                "ScatterplotLayer", data=orig_pts,
                 get_position="[lon, lat]", get_radius=4200,
-                get_fill_color=[255,160,0,120], get_line_color=[255,210,120,200],
-                line_width_min_pixels=1, pickable=True
+                get_fill_color=[245,160,32,180], get_line_color=[255,210,100,220],
+                line_width_min_pixels=1, pickable=True, auto_highlight=True
             ))
-        if not puntos_destino_f.empty:
+        if not cent_pts.empty:
             layers.append(pdk.Layer(
-                "ScatterplotLayer", data=puntos_destino_f,
-                get_position="[LONGITUD, LATITUD]", get_radius=13500,
+                "ScatterplotLayer", data=cent_pts,
+                get_position="[lon, lat]", get_radius=13500,
                 get_fill_color=[0,210,255,190], get_line_color=[170,245,255,255],
                 line_width_min_pixels=2, pickable=True
             ))
@@ -877,7 +807,7 @@ def render_layout_principal(
                 "html": "<b>{tipo_elemento}</b><br/>{detalle_1}<br/>{detalle_2}<br/>{detalle_3}<br/>{detalle_4}",
                 "style": {"backgroundColor":"rgba(18,22,29,0.95)","color":"#F5F7FA","fontSize":"12px"}
             },
-            map_style="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
+            map_style="dark"
         )
         st.pydeck_chart(deck, use_container_width=True)
 
@@ -907,22 +837,14 @@ def render_layout_principal(
         else:
             st.info("No hay datos para la serie mensual con los filtros actuales.")
 
-    # ---- Columna derecha: sankey + contexto ----
+    # ---- Columna derecha: sankey ----
     with right_col:
         st.markdown('<div class="panel">', unsafe_allow_html=True)
-        st.markdown('<div class="panel-title">Volumen de abastecimiento a las centrales mayoristas</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="panel-title">Flujos hacia centrales mayoristas<br><span style="font-weight:400;font-size:0.82rem;color:#AEB9C9;">{rubro_sel}</span></div>', unsafe_allow_html=True)
         if not sankey_top.empty:
             st.plotly_chart(construir_sankey(sankey_top), use_container_width=True)
         else:
             st.info("No hay datos suficientes para mostrar.")
-        st.markdown('<div class="panel-title" style="margin-top:0.9rem;">Contexto interpretativo</div>', unsafe_allow_html=True)
-        if not municipios_eficientes.empty:
-            st.markdown(
-                f"<div class='small-note'>{construir_texto_contexto(municipios_eficientes, rubro_sel, destino_label, fecha_ini, fecha_fin, semestre_sel)}</div>",
-                unsafe_allow_html=True
-            )
-        else:
-            st.markdown("<div class='small-note'>No se identificaron municipios con información suficiente para destacar eficiencia relativa en este filtro.</div>", unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
 
@@ -1028,11 +950,10 @@ render_layout_principal(
     centrales_activas=centrales_activas,
     geojson_municipios=geojson_municipios,
     flujos_mapa=flujos_mapa,
-    puntos_origen_agg=puntos_origen_agg,
-    puntos_destino_f=puntos_destino_f,
+    orig_pts=orig_pts,
+    cent_pts=cent_pts,
     serie_mensual=serie_mensual,
     sankey_top=sankey_top,
-    municipios_eficientes=municipios_eficientes,
     rubro_sel=rubro_sel,
     destino_label=destino_label,
     fecha_ini=fecha_ini,
