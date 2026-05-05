@@ -856,7 +856,6 @@ def render_layout_principal(
 def render_tabla(ranking, max_filas_tabla):
     st.markdown('<div class="panel-title" style="margin-top:0.8rem;">Tabla consolidada de análisis</div>', unsafe_allow_html=True)
     if not ranking.empty:
-        # Columnas ordenables — se conservan como numéricas para el sort
         tabla_num = ranking[[
             "ranking","MUNICIPIO_ORIGEN","DEPARTAMENTO_ORIGEN",
             "precio_promedio","precio_moda","toneladas_total","recursos_movilizados_aprox",
@@ -864,11 +863,20 @@ def render_tabla(ranking, max_filas_tabla):
             "participacion_rape_pct","ventaja_precio_pct","indice_eficiencia"
         ]].copy()
         tabla_num = tabla_num.rename(columns={
-            "MUNICIPIO_ORIGEN":    "municipio_origen",
-            "DEPARTAMENTO_ORIGEN": "departamento_origen",
-            "precio_promedio":     "precio_promedio_municipio",
+            "ranking":                 "Ranking",
+            "MUNICIPIO_ORIGEN":        "Municipio origen",
+            "DEPARTAMENTO_ORIGEN":     "Departamento origen",
+            "precio_promedio":         "Precio promedio",
+            "precio_moda":             "Precio moda",
+            "toneladas_total":         "Toneladas acumuladas",
+            "recursos_movilizados_aprox": "Recursos movilizados aprox.",
+            "meses_participacion":     "Meses activos",
+            "participacion_filtro_pct":"Participación en filtro",
+            "participacion_total_pct": "Participación total",
+            "participacion_rape_pct":  "Participación RAPE",
+            "ventaja_precio_pct":      "Ventaja precio",
+            "indice_eficiencia":       "Índice de eficiencia",
         })
-        tabla_num = tabla_num.rename(columns=NOMBRES_COLUMNAS_PRESENTABLES)
 
         # Selector de ordenamiento
         cols_ordenables = [
